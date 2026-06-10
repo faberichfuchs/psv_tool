@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/
+
+# IDE
+.idea/
+.vscode/
+
+# Project-specific: large/private data
+material/
+chroma_db/
+
+# Claude Code internal
+.claude/
+
+# Misc
+*.tmp
+*.log
