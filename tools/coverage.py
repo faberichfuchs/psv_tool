@@ -522,13 +522,17 @@ Für ein unabhängiges Paar wird benötigt:
                         f"Bitte zuerst korrigieren (fehlgeschlagene Testzeilen: {[i + 1 for i in baseline_failures]})."
                     )
                 else:
-                    mutants = _generate_mutants(_py, max_mutants=int(max_mutants))
+                    with st.spinner("Generiere Mutanten..."):
+                        mutants = _generate_mutants(_py, max_mutants=int(max_mutants))
                     if not mutants:
                         st.info("Keine mutierbaren Operatoren gefunden (And/Or, +/-, */ //, Vergleichsoperatoren).")
                     else:
                         killed = []
                         survived = []
-                        for m in mutants:
+                        prog = st.progress(0, text=f"Teste Mutanten... 0/{len(mutants)}")
+                        for idx, m in enumerate(mutants):
+                            prog.progress((idx + 1) / len(mutants),
+                                          text=f"Teste Mutanten... {idx+1}/{len(mutants)}")
                             try:
                                 mutant_out = _run_tests_for_code(m["code"], tests)
                                 if mutant_out != baseline:
@@ -539,6 +543,7 @@ Für ein unabhängiges Paar wird benötigt:
                                 m2 = dict(m)
                                 m2["crash"] = f"{type(exc).__name__}: {exc}"
                                 killed.append(m2)
+                        prog.empty()
 
                         total = len(mutants)
                         killed_n = len(killed)
@@ -734,17 +739,43 @@ Für ein unabhängiges Paar wird benötigt:
         return [f"{func_name}({', '.join([str(i)]*n_params)})" for i in vals]
 
     def _mcdc_obligations_for_suite(py_src, test_cases):
-        """Return set of (decision_id, atom_id) pairs with a witness in the suite."""
+        """Return (meta, covered_set, total_set) of (did, atom_id, atom_text) triples."""
         try:
             instr, meta = _build_instrumented_code_for_decisions(py_src)
         except Exception:
             return {}, set(), set()
+
         decision_log = {}
+        current_rows = {}
+
+        def __psv_atom(decision_id, atom_id, value):
+            row = current_rows.setdefault(decision_id, {})
+            row[atom_id] = bool(value)
+            return value
+
+        def __psv_decision(decision_id, value):
+            out = bool(value)
+            entry = decision_log.setdefault(decision_id, {"true": 0, "false": 0, "evals": []})
+            entry["true" if out else "false"] += 1
+            row = current_rows.pop(decision_id, {})
+            row["__result__"] = out
+            entry["evals"].append(row)
+            return value
+
+        def __psv_bool_op(decision_id, op, *values):
+            bool_vals = [bool(v) for v in values]
+            return any(bool_vals) if op == "or" else all(bool_vals)
+
+        ns_base = {"__psv_atom": __psv_atom, "__psv_decision": __psv_decision,
+                   "__psv_bool_op": __psv_bool_op}
+        exec(compile(instr, "<instr>", "exec"), ns_base)
+
         for tc in test_cases:
             try:
-                _run_tests_for_code(instr, [tc], decision_log=decision_log)
+                eval(tc, dict(ns_base))  # noqa: S307
             except Exception:
                 pass
+
         covered = set()
         total = set()
         for did, dmeta in meta.items():
@@ -805,41 +836,104 @@ Für ein unabhängiges Paar wird benötigt:
                     remaining -= gain
                     pool = [c for c in pool if c != best]
 
+                def _atom_label(did, aid, atxt):
+                    expr = dmeta.get(did, {}).get("expr", "?")
+                    lineno = dmeta.get(did, {}).get("lineno", "?")
+                    return f"Zeile {lineno}: Decision `{expr}` — Condition `{atxt}`"
+
+                coverable = set()
+                for cov in tc_cov.values():
+                    coverable |= cov
+                infeasible = total_obligs - already_cov - coverable
+
                 if not remaining:
                     if not selected:
-                        st.success("✅ MC/DC bereits vollständig abgedeckt.")
+                        st.success("✅ MC/DC bereits vollständig abgedeckt — keine Ergänzung nötig.")
                     else:
-                        st.success(f"✅ MC/DC vollständig mit **{len(selected)}** zusätzlichem Testfall:")
-                        cumcov = set(already_cov)
-                        for i, tc in enumerate(selected, 1):
-                            new = tc_cov.get(tc, set()) - cumcov
-                            cumcov |= new
-                            atoms_str = ", ".join(f"D{did} atom[{aid}] `{atxt}`" for did, aid, atxt in sorted(new))
-                            st.markdown(f"**+T{i}:** `{tc}` — deckt: {atoms_str or '–'}")
-                else:
-                    coverable = set()
-                    for cov in tc_cov.values():
-                        coverable |= cov
-                    infeasible = remaining - coverable
-                    if selected:
-                        covered_so_far = len(total_obligs) - len(remaining)
-                        st.warning(f"⚠ Mit {len(selected)} Ergänzung(en): {covered_so_far}/{len(total_obligs)} abgedeckt.")
+                        st.success(f"✅ MC/DC vollständig erfüllbar — {len(selected)} Testfall/Testfälle hinzufügen:")
                         cumcov = set(already_cov)
                         for i, tc in enumerate(selected, 1):
                             new = tc_cov.get(tc, set()) - cumcov
                             cumcov |= new
                             st.markdown(f"**+T{i}:** `{tc}`")
+                            for did, aid, atxt in sorted(new):
+                                st.markdown(f"  → deckt {_atom_label(did, aid, atxt)}")
+                else:
+                    if selected:
+                        covered_so_far = len(total_obligs) - len(remaining)
+                        st.warning(f"⚠ Teilweise abgedeckt: {covered_so_far}/{len(total_obligs)} mit {len(selected)} Ergänzung(en).")
+                        cumcov = set(already_cov)
+                        for i, tc in enumerate(selected, 1):
+                            new = tc_cov.get(tc, set()) - cumcov
+                            cumcov |= new
+                            st.markdown(f"**+T{i}:** `{tc}`")
+                            for did, aid, atxt in sorted(new):
+                                st.markdown(f"  → deckt {_atom_label(did, aid, atxt)}")
                     if infeasible:
-                        st.error(f"❌ {len(infeasible)} MC/DC-Obligation(en) nicht erreichbar (n=0..{n_max}):")
+                        st.error(f"❌ {len(infeasible)} Condition(en) strukturell nicht erreichbar (kein Kandidat n=0..{n_max}):")
                         for did, aid, atxt in sorted(infeasible):
-                            lineno = dmeta.get(did, {}).get("lineno", "?")
-                            st.markdown(f"  ❌ D{did} Z.{lineno} atom[{aid}] `{atxt}`: kein unabhängiges Paar möglich")
+                            st.markdown(f"  ❌ {_atom_label(did, aid, atxt)}: kein unabhängiges Paar möglich")
 
-                with st.expander("Details: MC/DC-Obligationen"):
-                    for did, aid, atxt in sorted(total_obligs):
-                        lineno = dmeta.get(did, {}).get("lineno", "?")
-                        ok = (did, aid, atxt) in already_cov
-                        st.markdown(f"{'✅' if ok else '❌'} D{did} Z.{lineno} atom[{aid}] `{atxt}`")
+                # Übersicht aller Obligationen mit Erklärung
+                with st.expander("📋 Alle MC/DC-Obligationen im Detail"):
+                    st.markdown("""
+**Was bedeuten die Obligationen?**
+MC/DC verlangt für jede **Condition** (atomare Teilbedingung) in jeder Decision ein **unabhängiges Paar**:
+zwei Testfälle t₁, t₂ bei denen sich *nur diese eine Condition* unterscheidet und das Decision-Ergebnis wechselt.
+""")
+                    st.divider()
+                    for did in sorted(dmeta):
+                        meta_d = dmeta[did]
+                        expr = meta_d.get("expr", "?")
+                        lineno = meta_d.get("lineno", "?")
+                        atoms = meta_d.get("atoms", [])
+                        st.markdown(f"**Zeile {lineno}: Decision `{expr}`** ({len(atoms)} Condition(en))")
+                        for aid, atxt in enumerate(atoms):
+                            key = (did, aid, atxt)
+                            ok = key in already_cov
+                            if ok:
+                                st.markdown(f"  ✅ Condition `{atxt}` — unabhängiges Paar bereits in bestehender Test-Suite")
+                            elif key in infeasible:
+                                st.markdown(f"  ❌ Condition `{atxt}` — kein erreichbares unabhängiges Paar (n=0..{n_max})")
+                            else:
+                                added_by = next((tc for tc in selected if key in (tc_cov.get(tc, set()) - already_cov)), None)
+                                st.markdown(f"  ➕ Condition `{atxt}` — wird abgedeckt durch `{added_by}`")
+
+                # Prüfungs-Erklärung
+                with st.expander("📝 MC/DC — Prüfungs-Erklärung (Muster-Antwort)", expanded=bool(remaining or selected)):
+                    if not selected and not remaining:
+                        st.success(
+                            "**MC/DC ist erfüllt.**\n\n"
+                            "Begründung: Für jede Condition in jeder Decision existiert ein unabhängiges Paar "
+                            "in der Test-Suite — zwei Testfälle, bei denen sich genau diese Condition ändert "
+                            "und das Decision-Ergebnis wechselt, während alle anderen Conditions gleich bleiben."
+                        )
+                    else:
+                        lines = []
+                        if selected:
+                            lines.append(
+                                f"**MC/DC ist mit der gegebenen Test-Suite noch nicht erfüllt**, "
+                                f"kann aber durch Hinzufügen von {len(selected)} Testfall/Testfällen erfüllt werden:\n"
+                            )
+                            cumcov = set(already_cov)
+                            for i, tc in enumerate(selected, 1):
+                                new = tc_cov.get(tc, set()) - cumcov
+                                cumcov |= new
+                                for did, aid, atxt in sorted(new):
+                                    expr = dmeta.get(did, {}).get("expr", "?")
+                                    lineno = dmeta.get(did, {}).get("lineno", "?")
+                                    lines.append(
+                                        f"- `{tc}` → unabhängiges Paar für Condition `{atxt}` "
+                                        f"in Decision `{expr}` (Zeile {lineno})"
+                                    )
+                        if infeasible:
+                            lines.append(f"\n**Volle MC/DC-Abdeckung nicht erreichbar**, da für folgende Conditions "
+                                         f"kein unabhängiges Paar existiert (kein Testfall n=0..{n_max} deckt sie):")
+                            for did, aid, atxt in sorted(infeasible):
+                                expr = dmeta.get(did, {}).get("expr", "?")
+                                lineno = dmeta.get(did, {}).get("lineno", "?")
+                                lines.append(f"- Condition `{atxt}` in Decision `{expr}` (Zeile {lineno})")
+                        st.markdown("\n".join(lines))
             except Exception as e:
                 st.error(f"Fehler: {e}")
                 st.code(traceback.format_exc())
@@ -951,34 +1045,114 @@ Für ein unabhängiges Paar wird benötigt:
         st.info("Wird nach **Analysieren** automatisch berechnet.")
 
     st.divider()
-    st.subheader("🧬 Mutation Equivalence Detector")
-    st.caption("Prüft, ob ein überlebender Mutant evtl. semantisch äquivalent ist.")
+    st.subheader("🧬 Spezifischen Mutanten testen")
+    st.caption("Exam-Aufgabe: Gegeben ein konkreter Mutant (z.B. `a > b` → `a >= b`) — gibt es einen strongly killing test case? Mutanten-Code unten einfügen, dann auf Testfälle aus dem Analysieren-Bereich testen ODER eigene Testfälle angeben.")
 
     mutant_code_input = st.text_area(
-        "Mutanten-Code (zum Vergleich mit Original-Code oben)",
+        "Mutanten-Code (Original-Code mit der Mutation — vollständige Funktion)",
         height=140,
         placeholder="def f(x):\n    return x + 1",
         key="mutation_equiv_code",
     )
 
-    if st.button("Äquivalenz Original vs Mutant prüfen", key="mutation_equiv_btn", type="secondary"):
+    col_eq1, col_eq2 = st.columns(2)
+    _run_auto_kill = col_eq2.button("🔍 Suche killing test case (automatisch, n=0..10)", key="mutation_auto_kill_btn", type="secondary")
+    _run_manual = col_eq1.button("Teste mit obigen Testfällen", key="mutation_equiv_btn", type="secondary")
+
+    def _diff_mutations(orig_src, mut_src):
+        """Find lines that differ between original and mutant."""
+        orig_lines = orig_src.splitlines()
+        mut_lines  = mut_src.splitlines()
+        diffs = []
+        for i, (a, b) in enumerate(zip(orig_lines, mut_lines), 1):
+            if a.strip() != b.strip():
+                diffs.append((i, a.strip(), b.strip()))
+        return diffs
+
+    def _show_kill_result(eq, label="", orig_src="", mut_src=""):
+        diffs = _diff_mutations(orig_src, mut_src) if orig_src and mut_src else []
+
+        if eq.get("equivalent"):
+            st.info(f"⚠ {label}Kein killing test case gefunden.")
+
+            diff_md = ""
+            if diffs:
+                diff_md = "**Mutation (geänderte Zeilen):**\n"
+                for lineno, orig_line, mut_line in diffs:
+                    diff_md += f"\n- Zeile {lineno}: `{orig_line}` → `{mut_line}`\n"
+
+            st.markdown(f"""
+{diff_md}
+**Prüfungs-Erklärung — kein Strong Kill möglich:**
+
+Ein Testfall tötet den Mutanten stark, wenn Original und Mutant **unterschiedliche Rückgabewerte** liefern.
+Das setzt voraus, dass die mutierte Bedingung bei einem Testfall **anders auswertet** als das Original
+**und** dieses unterschiedliche Verzweigen das Ergebnis ändert.
+
+**Warum ist das hier nicht möglich?**
+
+Die mutierte Bedingung ist `{diffs[0][2] if diffs else '?'}` (original: `{diffs[0][1] if diffs else '?'}`).
+Der einzige Fall, in dem diese beiden Bedingungen verschieden auswerten, ist wenn die involvierten
+Variablen **gleich** sind (z.B. `a == b`).
+
+Prüfe: **Kann dieser Fall in der mutierten Bedingung überhaupt eintreten?**
+- Schau dir die umgebende Schleifenbedingung / Guards an.
+- Falls die Schleife mit `while a != b` läuft, ist im Schleifenrumpf **immer** `a ≠ b` garantiert.
+  → `a > b` und `a >= b` werten dann immer gleich aus, weil `a == b` strukturell ausgeschlossen ist.
+
+**Fazit für die Prüfungsantwort:**
+Es gibt keinen strongly killing test case, weil die Mutation die Bedingung `{diffs[0][1] if diffs else '?'}` zu
+`{diffs[0][2] if diffs else '?'}` ändert. Diese beiden Ausdrücke unterscheiden sich nur wenn die beteiligten
+Variablen gleich sind. Da die umgebende Schleifenbedingung `a ≠ b` garantiert (Schleifeninvariante),
+kann dieser Fall im Schleifenrumpf nie eintreten — Original und Mutant sind **semantisch äquivalent**.
+""")
+        else:
+            tc = eq['counterexample']
+            out_orig = eq['out_a']
+            out_mut  = eq['out_b']
+            st.success(f"✅ {label}Strongly killing test case gefunden.")
+            st.markdown(f"""
+**Testfall:** `{tc}`
+
+| | Ergebnis |
+|---|---|
+| Original | `{out_orig}` |
+| Mutant   | `{out_mut}` |
+
+**Prüfungs-Erklärung (Strong Kill):**
+Der Testfall `{tc}` tötet den Mutanten stark (*strongly kills*), weil:
+- Das **Original** gibt `{out_orig}` zurück.
+- Der **Mutant** gibt `{out_mut}` zurück.
+- Die Ergebnisse unterscheiden sich → der Testfall detektiert die Mutation.
+
+Ein Testfall tötet einen Mutanten **stark**, wenn er auf dem Original korrekt terminiert
+und auf dem Mutanten ein **anderes Ergebnis** liefert. Beide Bedingungen sind hier erfüllt.
+""")
+
+    if _run_auto_kill or _run_manual:
         _py = st.session_state.get("_cov_py", code_input)
-        if not _py.strip() or not mutant_code_input.strip() or not test_cases_input.strip():
-            st.warning("Bitte Original-Code, Mutanten-Code und Testfälle eingeben.")
+        if not _py.strip() or not mutant_code_input.strip():
+            st.warning("Bitte Original-Code und Mutanten-Code eingeben.")
         else:
             try:
-                tests = [tc.strip() for tc in test_cases_input.splitlines() if tc.strip()]
-                eq = _detect_mutation_equivalence(_py, mutant_code_input, tests)
-                if eq.get("equivalent"):
-                    st.info("⚠ Auf den gegebenen Tests äquivalent (kein Gegenbeispiel gefunden).")
+                if _run_manual:
+                    if not test_cases_input.strip():
+                        st.warning("Bitte Testfälle eingeben.")
+                    else:
+                        tests = [tc.strip() for tc in test_cases_input.splitlines() if tc.strip()]
+                        eq = _detect_mutation_equivalence(_py, mutant_code_input, tests)
+                        _show_kill_result(eq, orig_src=_py, mut_src=mutant_code_input)
                 else:
-                    st.success("✅ Nicht äquivalent — Gegenbeispiel gefunden.")
-                    st.write(f"Test: `{eq['counterexample']}`")
-                    st.write(f"Original: `{eq['out_a']}`")
-                    st.write(f"Mutant: `{eq['out_b']}`")
+                    func_name2, n_params2 = _extract_func_info(_py)
+                    cands = _auto_candidates(func_name2, 10, n_params2) if func_name2 else []
+                    with st.spinner(f"Teste {len(cands)} Kandidaten..."):
+                        eq = _detect_mutation_equivalence(_py, mutant_code_input, cands)
+                    _show_kill_result(eq, label=f"(n=0..10, {len(cands)} Kandidaten) ",
+                                      orig_src=_py, mut_src=mutant_code_input)
             except Exception as e:
                 st.error(f"Fehler: {e}")
                 st.code(traceback.format_exc())
+
 
     with st.expander("📋 Manuelle Checkliste (für Prüfung ohne Tool)"):
         st.markdown("""
