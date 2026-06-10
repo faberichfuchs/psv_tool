@@ -1305,6 +1305,12 @@ def _wp_of_stmts(stmts, post, vars_dict, z3ns, steps, depth=0):
                 var_name = stmt.targets[0].id
                 rhs_str = ast.unparse(stmt.value)
                 expr_z3 = eval(rhs_str, z3ns)
+                if isinstance(expr_z3, int):
+                    from z3 import IntVal
+                    expr_z3 = IntVal(expr_z3)
+                elif isinstance(expr_z3, float):
+                    from z3 import RealVal
+                    expr_z3 = RealVal(expr_z3)
                 new = substitute(current, (vars_dict[var_name], expr_z3))
                 steps.append(
                     f"{indent}← `{var_name} := {rhs_str}` → `{new}`"
@@ -1448,171 +1454,207 @@ def _generate_hoare_proof(
     domain_hint: str = "N₀",
 ):
     """
-    Generates a step-by-step Hoare proof in exam format.
-    Returns a list of strings (Markdown lines) annotating the program.
+    Generates a step-by-step Hoare proof in exam annotation format.
+    Returns a list of markdown strings.
 
-    Format mirrors a hand-written proof:
+    Format:
       {Pre}
-      stmt;   ← Regel: ...
-      {Mid}
-      while (B) {
-        {I ∧ B}
-        body;  ← Zuweisungsregel: WP(...)
-        {I}
+      if (B) {
+          {Pre ∧ B}   ← if-Regel
+          x = e;
+          {I}         ← Zuweisungsregel: WP(x:=e, I) = ...
+      } else {
+          {Pre ∧ ¬B}  ← if-Regel
+          x = e;
+          {I}         ← Zuweisungsregel: WP(x:=e, I) = ...
       }
-      {Post}   ← Konsequenz: I ∧ ¬B ⊨ Post
+      {I}             ← if/else-Regel: beide Zweige ✅
+      while (B) {
+          {I ∧ B}     ← While-Regel
+          x = x + 1;
+          {I}         ← Zuweisungsregel: WP(...) + Consequence ✅
+      }
+      {I ∧ ¬B}       ← While-Regel
+      {Post}          ← Konsequenz-Regel: I ∧ ¬B ⊨ Post ✅
     """
-    from z3 import Int, And, Or, Not, Implies, Solver, sat, unsat, substitute
+    from z3 import Int, And, Or, Not, Implies, Solver, sat, unsat, substitute, BoolVal, IntVal, is_expr
 
     code = textwrap.dedent(code)
     tree = ast.parse(code)
 
-    # Build variable dict
     names = sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name)})
     extra = [v.strip() for v in vars_str.split(",") if v.strip()]
-    all_names = sorted(set(names) | set(extra))
-    vars_dict = {n: Int(n) for n in all_names}
-    z3ns = {**vars_dict, "And": And, "Or": Or, "Not": Not, "Implies": Implies}
+    vars_dict = {n: Int(n) for n in sorted(set(names) | set(extra))}
+    z3ns = {**vars_dict, "And": And, "Or": Or, "Not": Not, "Implies": Implies, "BoolVal": BoolVal}
+
+    def _eval_z3(s):
+        """Eval a string as a Z3 expression, rewriting and/or/not via AST."""
+        import ast as _ast2
+        s = s.strip()
+        if s.lower() == 'true':  return BoolVal(True)
+        if s.lower() == 'false': return BoolVal(False)
+        try:
+            tree2 = _ast2.parse(s, mode='eval')
+        except SyntaxError:
+            return eval(s, z3ns)
+
+        class _BoolRewriter(_ast2.NodeTransformer):
+            def visit_BoolOp(self, node):
+                self.generic_visit(node)
+                fn = 'And' if isinstance(node.op, _ast2.And) else 'Or'
+                return _ast2.Call(func=_ast2.Name(id=fn, ctx=_ast2.Load()),
+                                  args=node.values, keywords=[])
+            def visit_UnaryOp(self, node):
+                self.generic_visit(node)
+                if isinstance(node.op, _ast2.Not):
+                    return _ast2.Call(func=_ast2.Name(id='Not', ctx=_ast2.Load()),
+                                      args=[node.operand], keywords=[])
+                return node
+
+        new_tree = _ast2.fix_missing_locations(_BoolRewriter().visit(tree2))
+        compiled = compile(new_tree, '<z3eval>', 'eval')
+        return eval(compiled, z3ns)
+
+    _safe_eval = _eval_z3
 
     try:
-        I    = eval(invariant_str, z3ns)
-        Pre  = eval(pre_str,       z3ns)
-        Post = eval(post_str,      z3ns)
+        I    = _eval_z3(invariant_str)
+        Pre  = _eval_z3(pre_str)
+        Post = _eval_z3(post_str)
     except Exception as e:
         return [f"❌ Fehler beim Parsen: {e}"]
 
-    lines = []
+    def _wp_assign(stmt, post):
+        """Compute WP for a single assignment statement."""
+        v = stmt.targets[0].id
+        r = ast.unparse(stmt.value)
+        rv = eval(r, z3ns)
+        if not is_expr(rv): rv = IntVal(int(rv))
+        return substitute(post, (vars_dict[v], rv)), v, r
 
-    def fmt(z3expr):
-        """Format a Z3 expression as a readable string."""
-        s = str(z3expr)
-        # Basic prettification
-        s = s.replace("And(", "").replace("Or(", "")
-        return str(z3expr)
+    def _wp_stmts(stmts, post):
+        """Compute WP backwards through a list of assignment-only statements."""
+        cur = post
+        for s in reversed(stmts):
+            if isinstance(s, ast.Assign) and len(s.targets) == 1 and s.targets[0].id in vars_dict:
+                cur, _, _ = _wp_assign(s, cur)
+        return cur
 
-    def wp_backwards(stmts, post_z3):
-        """Return list of (stmt_src, rule_name, premise, result_wp) tuples."""
-        from z3 import IntVal, is_expr
-        steps = []
-        current = post_z3
-        for stmt in reversed(stmts):
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                var_name = stmt.targets[0].id
-                rhs_str  = ast.unparse(stmt.value)
-                if var_name in vars_dict:
-                    rhs_val = eval(rhs_str, z3ns)
-                    if not is_expr(rhs_val):
-                        rhs_val = IntVal(int(rhs_val))
-                    new = substitute(current, (vars_dict[var_name], rhs_val))
-                    steps.append({
-                        "stmt":    ast.unparse(stmt),
-                        "regel":   "Zuweisungsregel",
-                        "premise": f"WP({var_name} = {rhs_str}, `{current}`) = `{new}`",
-                        "wp":      new,
-                    })
-                    current = new
-            elif isinstance(stmt, ast.If):
-                cond_str = ast.unparse(stmt.test)
-                cond_z3  = eval(cond_str, z3ns)
-                then_s = []
-                wp_then = current
-                for st2 in reversed(stmt.body):
-                    if isinstance(st2, ast.Assign) and len(st2.targets) == 1:
-                        v = st2.targets[0].id
-                        r = ast.unparse(st2.value)
-                        if v in vars_dict:
-                            rv = eval(r, z3ns)
-                            if not is_expr(rv): rv = IntVal(int(rv))
-                            wp_then = substitute(wp_then, (vars_dict[v], rv))
-                wp_else = current
-                for st2 in reversed(stmt.orelse or []):
-                    if isinstance(st2, ast.Assign) and len(st2.targets) == 1:
-                        v = st2.targets[0].id
-                        r = ast.unparse(st2.value)
-                        if v in vars_dict:
-                            rv = eval(r, z3ns)
-                            if not is_expr(rv): rv = IntVal(int(rv))
-                            wp_else = substitute(wp_else, (vars_dict[v], rv))
-                new = And(Implies(cond_z3, wp_then), Implies(Not(cond_z3), wp_else))
-                steps.append({
-                    "stmt":    f"if ({cond_str}) {{ ... }} else {{ ... }}",
-                    "regel":   "if/else-Regel",
-                    "premise": f"WP(then, Q)=`{wp_then}`, WP(else, Q)=`{wp_else}` → (B→WP_then)∧(¬B→WP_else)",
-                    "wp":      new,
-                })
-                current = new
-            else:
-                steps.append({"stmt": ast.unparse(stmt), "regel": "—", "premise": "nicht unterstützt", "wp": current})
-        return list(reversed(steps)), current
-
-    # Split into prefix (before while) and while node
-    loop = next((s for s in tree.body if isinstance(s, ast.While)), None)
-    prefix = [s for s in tree.body if s is not loop]
-    loop_body = loop.body if loop else []
-    cond_str = ast.unparse(loop.test) if loop else "?"
-
-    # ── Header ──────────────────────────────────────────────────────────────
-    lines.append(f"**{{Pre = {pre_str}}}**")
-    lines.append(f"> *gegeben*")
-    lines.append("")
-
-    # ── Prefix code ─────────────────────────────────────────────────────────
-    if prefix:
-        prefix_steps, wp_prefix = wp_backwards(prefix, I)
-        lines.append("*— Prefix-Code (Zuweisungsregel rückwärts, Ziel: I) —*")
-        for step in prefix_steps:
-            lines.append(f"```\n{step['stmt']}\n```")
-            lines.append(f"> **{step['regel']}:** {step['premise']}")
-            lines.append("")
-        # Check Pre ⊨ wp_prefix
+    def _check(solver_add_fn):
         s = Solver()
-        s.add(Pre, Not(wp_prefix))
-        ok = s.check() == unsat
-        lines.append(f"**{{I = {invariant_str}}}**  ← *Init-Check:* "
-                     f"Pre=`{pre_str}` ⊨ WP(prefix, I)=`{wp_prefix}` "
-                     f"{'✅' if ok else '❌ FEHLGESCHLAGEN'}")
-        lines.append("")
+        solver_add_fn(s)
+        return s.check() == unsat
 
-    # ── While-Regel ─────────────────────────────────────────────────────────
+    # pretty-print a Z3 expr in a readable way
+    def _fmt(expr):
+        s = str(expr)
+        # replace z3 And/Or with ∧/∨ etc. for readability
+        import re as _re
+        s = _re.sub(r'And\(([^()]+)\)', lambda m: ' ∧ '.join(x.strip() for x in m.group(1).split(',')), s)
+        s = _re.sub(r'Or\(([^()]+)\)', lambda m: ' ∨ '.join(x.strip() for x in m.group(1).split(',')), s)
+        s = s.replace('Not(', '¬(')
+        return s
+
+    loop   = next((s for s in tree.body if isinstance(s, ast.While)), None)
+    prefix = [s for s in tree.body if s is not loop]
+    cond_str = ast.unparse(loop.test) if loop else ""
+
+    out = []   # lines of the proof block
+
+    # ── {Pre} ────────────────────────────────────────────────────────────────
+    out.append(f"{{{pre_str}}}")
+    out.append(f"    ← gegeben")
+
+    # ── prefix statements (if/else or assignments) ────────────────────────────
+    for stmt in prefix:
+        if isinstance(stmt, ast.If):
+            cond = ast.unparse(stmt.test)
+            # then WP
+            wp_then = _wp_stmts(stmt.body, I)
+            # else WP
+            wp_else = _wp_stmts(stmt.orelse or [], I) if stmt.orelse else I
+
+            init_ok = _check(lambda s: (s.add(Pre, Not(
+                And(Implies(_eval_z3(cond), wp_then),
+                    Implies(Not(_eval_z3(cond)), wp_else))
+            )))
+            )
+
+            out.append(f"if ({cond}) {{")
+            out.append(f"    {{{pre_str} ∧ {cond}}}")
+            out.append(f"        ← if/else-Regel: Pre ∧ B")
+            for s2 in stmt.body:
+                if isinstance(s2, ast.Assign):
+                    v = s2.targets[0].id; r = ast.unparse(s2.value)
+                    out.append(f"    {v} = {r};")
+            out.append(f"    {{{_fmt(I)}}}")
+            then_ok = _check(lambda s: (s.add(_eval_z3(cond), Pre, Not(wp_then))))
+            out.append(f"        ← Zuweisungsregel: WP({stmt.body[0].targets[0].id}:={ast.unparse(stmt.body[0].value)}, I) = {_fmt(wp_then)}")
+            out.append(f"           Consequence: Pre ∧ B ⊨ WP  {'✅' if then_ok else '❌'}")
+            out.append(f"}} else {{")
+            out.append(f"    {{{pre_str} ∧ ¬({cond})}}")
+            out.append(f"        ← if/else-Regel: Pre ∧ ¬B")
+            for s2 in (stmt.orelse or []):
+                if isinstance(s2, ast.Assign):
+                    v = s2.targets[0].id; r = ast.unparse(s2.value)
+                    out.append(f"    {v} = {r};")
+            out.append(f"    {{{_fmt(I)}}}")
+            else_ok = _check(lambda s: (s.add(Not(_eval_z3(cond)), Pre, Not(wp_else))))
+            out.append(f"        ← Zuweisungsregel: WP({stmt.orelse[0].targets[0].id}:={ast.unparse(stmt.orelse[0].value)}, I) = {_fmt(wp_else)}")
+            out.append(f"           Consequence: Pre ∧ ¬B ⊨ WP  {'✅' if else_ok else '❌'}")
+            out.append(f"}}")
+            out.append(f"{{{_fmt(I)}}}")
+            out.append(f"    ← if/else-Regel: beide Zweige enden in I  {'✅' if init_ok else '❌'}")
+
+        elif isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            wp, v, r = _wp_assign(stmt, I)
+            ok = _check(lambda s: (s.add(Pre, Not(wp))))
+            out.append(f"{v} = {r};")
+            out.append(f"{{{_fmt(I)}}}")
+            out.append(f"    ← Zuweisungsregel: WP({v}:={r}, I) = {_fmt(wp)}")
+            out.append(f"       Consequence: Pre ⊨ WP  {'✅' if ok else '❌'}")
+
+    # ── while loop ────────────────────────────────────────────────────────────
     if loop:
-        lines.append(f"**while ({cond_str})**  ← *While-Regel:* {{I ∧ B}} body {{I}}")
-        lines.append("")
+        body_stmts = loop.body
+        wp_body = _wp_stmts(body_stmts, I)
 
-        # Body WP steps
-        body_steps, wp_body = wp_backwards(loop_body, I)
-        lines.append(f"  **{{I ∧ B = `{invariant_str}` ∧ `{cond_str}`}}**")
-        lines.append(f"  > *Schleifeneingang: Invariante + Bedingung gilt*")
-        lines.append("")
-        for step in body_steps:
-            lines.append(f"  ```\n  {step['stmt']}\n  ```")
-            lines.append(f"  > **{step['regel']}:** {step['premise']}")
-            lines.append("")
+        pres_ok = _check(lambda s: (
+            s.add(_safe_eval(invariant_str), _eval_z3(cond_str),
+                  *[v >= 0 for v in vars_dict.values()],
+                  Not(wp_body))
+        ))
+        out.append(f"while ({cond_str}) {{")
+        out.append(f"    {{{_fmt(I)} ∧ {cond_str}}}")
+        out.append(f"        ← While-Regel: I ∧ B gilt am Schleifeneingang")
+        for s2 in body_stmts:
+            if isinstance(s2, ast.Assign):
+                v = s2.targets[0].id; r = ast.unparse(s2.value)
+                out.append(f"    {v} = {r};")
+        out.append(f"    {{{_fmt(I)}}}")
+        if body_stmts and isinstance(body_stmts[0], ast.Assign):
+            bv = body_stmts[0].targets[0].id; br = ast.unparse(body_stmts[0].value)
+            out.append(f"        ← Zuweisungsregel: WP({bv}:={br}, I) = {_fmt(wp_body)}")
+        out.append(f"           Consequence: I ∧ B ⊨ WP(body, I)  {'✅' if pres_ok else '❌'}")
+        out.append(f"}}")
 
-        # Preservation check (add domain constraints for all vars: var >= 0 for N0)
-        s2 = Solver()
-        s2.add(eval(invariant_str, z3ns), eval(cond_str, z3ns), Not(wp_body))
-        for v in vars_dict.values():
-            s2.add(v >= 0)   # domain N0
-        pres_ok = s2.check() == unsat
-        lines.append(f"  **{{I = {invariant_str}}}**  ← *Erhaltungs-Check:* "
-                     f"I∧B ⊨ WP(body, I)=`{wp_body}` "
-                     f"{'✅' if pres_ok else '❌'}")
-        lines.append("")
+        # Exit annotation
+        out.append(f"{{{_fmt(I)} ∧ ¬({cond_str})}}")
+        out.append(f"    ← While-Regel: I bleibt, B ist falsch")
 
-        # Exit
-        s3 = Solver()
-        s3.add(eval(invariant_str, z3ns), Not(eval(cond_str, z3ns)), Not(Post))
-        conseq_ok = s3.check() == unsat
-        lines.append(f"**{{I ∧ ¬B = `{invariant_str}` ∧ ¬({cond_str})}}**")
-        lines.append(f"*Schleifen-Exit*")
-        lines.append("")
-        lines.append(f"**{{Post = {post_str}}}**  ← *Konsequenz-Regel:* "
-                     f"I∧¬B ⊨ Post "
-                     f"{'✅' if conseq_ok else '❌'}")
+        conseq_ok = _check(lambda s: (
+            s.add(_safe_eval(invariant_str), Not(_eval_z3(cond_str)),
+                  *[v >= 0 for v in vars_dict.values()],
+                  Not(Post))
+        ))
+        out.append(f"{{{post_str}}}")
+        out.append(f"    ← Konsequenz-Regel: I ∧ ¬B ⊨ Post  {'✅' if conseq_ok else '❌'}")
     else:
-        lines.append(f"**{{Post = {post_str}}}**")
+        out.append(f"{{{post_str}}}")
 
-    return lines
+    # Render as a single code block
+    proof_block = "```\n" + "\n".join(out) + "\n```"
+    return [proof_block]
 
 
 def _generate_invariant_ce_explanation(

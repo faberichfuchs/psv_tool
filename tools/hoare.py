@@ -17,6 +17,368 @@ from tools.shared import (
 )
 
 
+def _parse_triple(text: str):
+    """Parse '{Pre} code {Post}' from exam text.
+    Returns (pre, code, post) as strings, or raises ValueError."""
+    import re
+    # Extract {…} blocks — first = Pre, last = Post, middle = code
+    blocks = re.split(r'\{([^}]*)\}', text)
+    # blocks: ['before_pre', pre, 'code', post, 'after_post']
+    # Find all {…} contents
+    braces = re.findall(r'\{([^}]*)\}', text)
+    if len(braces) < 2:
+        raise ValueError("Mindestens zwei {…}-Blöcke erwartet: {Pre} code {Post}")
+    pre  = braces[0].strip()
+    post = braces[-1].strip()
+    # Extract code between first and last {…}
+    first_end = text.index('}') + 1
+    last_start = text.rindex('{')
+    code = text[first_end:last_start].strip()
+    return pre, code, post
+
+
+def _c_to_py_inline(code: str) -> str:
+    """Convert C-like exam code to Python syntax."""
+    import re
+
+    # Step 1: normalise everything onto separate lines by inserting newlines
+    # around { } and ; so every token is alone on its line
+    code = re.sub(r'\}\s*else\s*\{', '\n__ELSE__\n', code)
+    code = re.sub(r'\{', '\n{\n', code)
+    code = re.sub(r'\}', '\n}\n', code)
+    code = re.sub(r';', '\n', code)
+
+    flat = [l.strip() for l in code.splitlines() if l.strip()]
+
+    result_lines = []
+    indent = 0
+
+    for line in flat:
+        if line == '{':
+            indent += 1
+            continue
+        if line == '}':
+            indent = max(0, indent - 1)
+            continue
+        if line == '__ELSE__':
+            indent = max(0, indent - 1)
+            result_lines.append('    ' * indent + 'else:')
+            indent += 1
+            continue
+
+        # Convert control flow keywords — do NOT increment indent here; { does it
+        m = re.match(r'^while\s*\((.+)\)\s*$', line)
+        if m:
+            result_lines.append('    ' * indent + f'while {_fix_cond(m.group(1))}:')
+            continue
+        m = re.match(r'^if\s*\((.+)\)\s*$', line)
+        if m:
+            result_lines.append('    ' * indent + f'if {_fix_cond(m.group(1))}:')
+            continue
+
+        result_lines.append('    ' * indent + line)
+
+    raw_code = '\n'.join(result_lines)
+    try:
+        ast.parse(raw_code)
+        return raw_code
+    except SyntaxError:
+        return raw_code
+
+
+def _fix_cond(c: str) -> str:
+    """Convert C condition to Python (&&→and, ||→or, !→not)."""
+    import re
+    c = c.strip()
+    c = c.replace('&&', ' and ').replace('||', ' or ')
+    c = re.sub(r'!(?!=)', 'not ', c)
+    c = c.replace('!=', '!=')  # preserve !=
+    return c.strip()
+
+
+def _extract_vars(code: str, pre: str, post: str) -> list:
+    """Heuristically extract variable names from code + conditions."""
+    import re
+    names = re.findall(r'\b([a-z_][a-z0-9_]*)\b', code + ' ' + pre + ' ' + post)
+    keywords = {'and', 'or', 'not', 'if', 'else', 'while', 'return', 'true', 'false',
+                'True', 'False', 'int', 'unsigned', 'void'}
+    seen = []
+    for n in names:
+        if n not in keywords and n not in seen and not n.isdigit():
+            seen.append(n)
+    return seen
+
+
+def _render_triple_solver():
+    st.markdown("""
+**Füge den vollständigen Hoare-Triple aus der Angabe ein** — die App erkennt automatisch Pre, Code und Post,
+extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
+
+**Syntax-Hinweise:**
+- C-Syntax (`&&`, `||`, `!`) wird automatisch nach Python konvertiert
+- Angabe-Format: `{Pre}` Code `{Post}` (geschwungene Klammern)
+- Für die Invariante: Python/Z3-Syntax, z.B. `And(i >= 2, i <= 10)`
+""")
+
+    triple_input = st.text_area(
+        "Hoare-Triple aus der Angabe (inkl. {Pre} und {Post})",
+        height=200,
+        placeholder="{true}\nif (i < 2) {\n  i = 2;\n} else {\n  i = 7;\n}\nwhile (i > 1 && i < 10) {\n  i = i + 1;\n}\n{i != 1 && i != 11}",
+        key="triple_input",
+    )
+
+    parsed_ok = False
+    pre_str = code_str = post_str = py_code = ""
+    detected_vars = []
+
+    if triple_input.strip():
+        try:
+            pre_str, code_str, post_str = _parse_triple(triple_input)
+            py_code = _c_to_py_inline(code_str)
+            detected_vars = _extract_vars(py_code, pre_str, post_str)
+            parsed_ok = True
+            with st.expander("✅ Geparstes Triple", expanded=True):
+                col1, col2 = st.columns(2)
+                col1.markdown(f"**Pre:** `{pre_str}`")
+                col2.markdown(f"**Post:** `{post_str}`")
+                st.code(py_code, language="python")
+                st.caption(f"Erkannte Variablen: `{', '.join(detected_vars)}`")
+        except Exception as e:
+            st.error(f"Parse-Fehler: {e}")
+
+    if parsed_ok:
+        # Detect structure: does it have a while loop?
+        has_while = 'while' in py_code
+        has_if    = 'if' in py_code
+
+        # Split into init-code (before while) and while body
+        py_lines = py_code.splitlines()
+        init_lines = []
+        while_cond = ""
+        body_lines = []
+        in_while = False
+        while_indent = 0
+        for line in py_lines:
+            stripped = line.strip()
+            if not in_while and stripped.startswith('while ') and stripped.endswith(':'):
+                while_cond = stripped[6:-1].strip()
+                while_indent = len(line) - len(line.lstrip())
+                in_while = True
+            elif in_while:
+                if stripped:
+                    # Strip exactly while_indent+4 spaces (one level deeper)
+                    body_lines.append(line[while_indent + 4:] if len(line) > while_indent + 4 else stripped)
+            else:
+                if stripped:
+                    init_lines.append(line)  # keep original indentation
+
+        import textwrap as _tw
+        init_code_default = _tw.dedent('\n'.join(init_lines)).strip()
+        body_code_default = '\n'.join(body_lines)
+
+        st.divider()
+        if has_while:
+            st.markdown(f"**Erkannte Struktur:** {'if/else + ' if has_if else ''}while-Schleife")
+            st.markdown(f"- Init-Code: `{init_code_default or '(leer)'}`")
+            st.markdown(f"- While-Bedingung B: `{while_cond}`")
+            st.markdown(f"- Loop-Body: `{body_code_default}`")
+        else:
+            st.markdown("**Erkannte Struktur:** if/else (keine Schleife) — WP-Kalkül wird direkt angewendet")
+
+        # Invariant input (only needed for while)
+        if has_while:
+            inv_default = st.session_state.get("triple_inv_prefill", "")
+            inv_I = st.text_input(
+                "Loop-Invariante I (Z3-Syntax, z.B. `And(i >= 2, i <= 10)`)",
+                value=inv_default,
+                key="triple_inv",
+                help="Tippe deine Vermutung ein — Z3 prüft Init, Erhaltung, Konsequenz."
+            )
+        else:
+            inv_I = ""
+
+        vars_str = ', '.join(detected_vars)
+
+        if st.button("🔍 Beweisen / Prüfen", type="primary", key="triple_prove_btn"):
+            try:
+                import textwrap as _textwrap
+                from z3 import Int, And, Or, Not, Solver, sat, unsat, substitute, Implies, BoolVal
+
+                vars_dict = {v.strip(): Int(v.strip()) for v in detected_vars if v.strip()}
+                z3ns = {**vars_dict, "And": And, "Or": Or, "Not": Not, "Implies": Implies,
+                        "true": BoolVal(True), "false": BoolVal(False),
+                        "True": BoolVal(True), "False": BoolVal(False)}
+
+                def parse_z3(s):
+                    import re as _re
+                    s = s.strip()
+                    if s.lower() in ('true', 'true}', '{true'):
+                        return BoolVal(True)
+                    if s.lower() in ('false', 'false}', '{false'):
+                        return BoolVal(False)
+                    # Replace Python bool operators with Z3 equivalents
+                    # Wrap in And()/Or() only when bare and/or appears (not inside strings)
+                    # Simple approach: split on ' and '/' or ' and wrap
+                    def _z3ify(expr):
+                        # not X → Not(X)
+                        expr = _re.sub(r'\bnot\s+', 'Not(', expr) + (')' * len(_re.findall(r'\bnot\s+', expr)))
+                        # X and Y → And(X, Y) — handle via eval with z3ns which has And/Or
+                        return expr
+                    # Better: just replace bare and/or since z3ns doesn't have them
+                    s2 = _re.sub(r'\band\b', ' and ', s)  # keep as-is — instead override in ns
+                    ns = dict(z3ns)
+                    # Inject Python-friendly wrappers that work with Z3
+                    def _and(*args): return And(*args)
+                    def _or(*args):  return Or(*args)
+                    # Can't override 'and'/'or' keywords — use __builtins__ trick
+                    # Instead: rewrite expression to use And()/Or()
+                    def rewrite(expr):
+                        # Split on top-level ' and ' / ' or '
+                        # Simplest reliable approach: compile to ast and rewrite
+                        import ast as _ast2
+                        try:
+                            tree = _ast2.parse(expr, mode='eval')
+                        except SyntaxError:
+                            return expr
+                        class BoolOpRewriter(_ast2.NodeTransformer):
+                            def visit_BoolOp(self, node):
+                                self.generic_visit(node)
+                                func = 'And' if isinstance(node.op, _ast2.And) else 'Or'
+                                return _ast2.Call(
+                                    func=_ast2.Name(id=func, ctx=_ast2.Load()),
+                                    args=node.values, keywords=[])
+                            def visit_UnaryOp(self, node):
+                                self.generic_visit(node)
+                                if isinstance(node.op, _ast2.Not):
+                                    return _ast2.Call(
+                                        func=_ast2.Name(id='Not', ctx=_ast2.Load()),
+                                        args=[node.operand], keywords=[])
+                                return node
+                        new_tree = _ast2.fix_missing_locations(BoolOpRewriter().visit(tree))
+                        return compile(new_tree, '<string>', 'eval')
+                    compiled = rewrite(s)
+                    return eval(compiled, ns)
+
+                Pre  = parse_z3(pre_str)
+                Post = parse_z3(post_str)
+
+                if not has_while:
+                    # Pure if/else: compute WP of entire code
+                    import ast as _ast
+                    tree = _ast.parse(py_code)
+                    wp_steps = []
+                    wp_pre_computed = _wp_of_stmts(tree.body, Post, vars_dict, z3ns, wp_steps)
+                    s = Solver()
+                    s.add(Pre, Not(wp_pre_computed))
+                    ok = s.check() == unsat
+                    if ok:
+                        st.success("✅ Hoare-Triple **gültig** — Pre ⊨ WP(code, Post)")
+                    else:
+                        st.error("❌ Hoare-Triple **ungültig** — Gegenbeispiel gefunden")
+                        m = s.model()
+                        st.write({str(d.name()): str(m[d]) for d in m.decls()})
+                    with st.expander("WP-Derivation (rückwärts)", expanded=True):
+                        st.markdown(f"**Ziel:** `{Post}`")
+                        for step in wp_steps:
+                            st.markdown(step)
+                        st.markdown(f"**WP(code, Post) = `{wp_pre_computed}`**")
+                        st.markdown(f"**Pre = `{Pre}`**")
+                        st.markdown(f"Zu zeigen: Pre ⊨ WP  → {'✅ gilt' if ok else '❌ gilt nicht'}")
+                    return
+
+                # While case
+                if not inv_I.strip():
+                    st.warning("Bitte Loop-Invariante I eingeben.")
+                    return
+
+                I = parse_z3(inv_I)
+                B = parse_z3(while_cond)
+
+                # Consequence: I ∧ ¬B ⊨ Post
+                s1 = Solver()
+                s1.add(I, Not(B), Not(Post))
+                conseq_ok  = s1.check() == unsat
+                conseq_cex = s1.model() if not conseq_ok else None
+
+                # Preservation: I ∧ B ⊨ WP(body, I)
+                import ast as _ast
+                body_tree = _ast.parse(body_code_default)
+                body_wp_steps = []
+                wp_body = _wp_of_stmts(body_tree.body, I, vars_dict, z3ns, body_wp_steps)
+                s2 = Solver()
+                s2.add(And(I, B), Not(wp_body))
+                pres_ok  = s2.check() == unsat
+                pres_cex = s2.model() if not pres_ok else None
+
+                # Init: Pre ⊨ WP(init, I)
+                init_src = _textwrap.dedent(init_code_default.strip())
+                init_wp_steps = []
+                if init_src:
+                    init_tree = _ast.parse(init_src)
+                    wp_init = _wp_of_stmts(init_tree.body, I, vars_dict, z3ns, init_wp_steps)
+                else:
+                    wp_init = I
+                s3 = Solver()
+                s3.add(Pre, Not(wp_init))
+                init_ok  = s3.check() == unsat
+                init_cex = s3.model() if not init_ok else None
+
+                # Results
+                st.subheader("Ergebnis")
+                c1, c2, c3 = st.columns(3)
+                (c1.success if init_ok   else c1.error)(("✅" if init_ok   else "❌") + " Init\nPre ⊨ WP(init, I)")
+                (c2.success if pres_ok   else c2.error)(("✅" if pres_ok   else "❌") + " Erhaltung\nI ∧ B ⊨ WP(body, I)")
+                (c3.success if conseq_ok else c3.error)(("✅" if conseq_ok else "❌") + " Konsequenz\nI ∧ ¬B ⊨ Post")
+
+                all_ok = init_ok and pres_ok and conseq_ok
+                if all_ok:
+                    st.success("🎉 **Beweis vollständig** — I ist eine gültige Loop-Invariante.")
+                elif not init_ok:
+                    st.error("❌ **Init schlägt fehl** — I gilt nach dem Init-Code nicht. Stärke I oder ändere Init.")
+                elif not pres_ok:
+                    st.warning("⚠ **Erhaltung schlägt fehl** — I wird im Loop-Body verletzt. Ändere I.")
+                elif not conseq_ok:
+                    st.error("❌ **Konsequenz schlägt fehl** — I ∧ ¬B impliziert Post nicht. Stärke I.")
+
+                # WP expanders
+                with st.expander("WP-Derivation: Loop-Body → I"):
+                    st.markdown(f"**Ziel (I):** `{I}`")
+                    for step in body_wp_steps:
+                        st.markdown(step)
+                    st.markdown(f"**WP(body, I) = `{wp_body}`**")
+
+                with st.expander("WP-Derivation: Init-Code → I"):
+                    st.markdown(f"**Ziel (I):** `{I}`")
+                    for step in init_wp_steps:
+                        st.markdown(step)
+                    st.markdown(f"**WP(init, I) = `{wp_init}`**")
+
+                # Counterexamples
+                for label, model in [("Init schlägt fehl", init_cex),
+                                      ("Erhaltung schlägt fehl", pres_cex),
+                                      ("Konsequenz schlägt fehl", conseq_cex)]:
+                    if model:
+                        with st.expander(f"Gegenbeispiel: {label}"):
+                            st.json({str(d.name()): str(model[d]) for d in model.decls()})
+
+                # Annotated proof
+                with st.expander("📝 Annotierter Beweis (Prüfungs-Format)", expanded=all_ok):
+                    proof_lines = _generate_hoare_proof(
+                        code=init_code_default + "\nwhile " + while_cond + ":\n" +
+                             "\n".join("    " + l for l in body_code_default.splitlines()),
+                        invariant_str=inv_I,
+                        pre_str=pre_str,
+                        post_str=post_str,
+                        vars_str=vars_str,
+                    )
+                    for ln in proof_lines:
+                        st.markdown(ln)
+
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+                st.code(traceback.format_exc())
+
+
 def render():
     st.header("Hoare Logic & Loop Invariants")
 
@@ -44,10 +406,12 @@ def render():
     st.subheader("🔧 Deterministische Verifikation mit Z3")
     st.caption("Kein LLM — 100% deterministisch. Gib Invariante ein, Z3 prüft alle 3 Bedingungen.")
 
-    wp_mode = st.radio("Modus", ["Loop-Invariante prüfen", "WP-Kalkulator (Zuweisung)"], key="wp_mode",
+    wp_mode = st.radio("Modus", ["Prüfungs-Triple lösen", "Loop-Invariante prüfen", "WP-Kalkulator (Zuweisung)"], key="wp_mode",
                        horizontal=True)
 
-    if wp_mode == "Loop-Invariante prüfen":
+    if wp_mode == "Prüfungs-Triple lösen":
+        _render_triple_solver()
+    elif wp_mode == "Loop-Invariante prüfen":
         st.markdown("""**Syntax:** Python-Ausdrücke mit Z3. Beispiel: `And(y == i, i >= 0, i <= n)`, `i < n`, `y == n`""")
 
         col1, col2 = st.columns(2)
