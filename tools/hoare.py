@@ -14,6 +14,7 @@ from tools.shared import (
     _falsify_loop_invariant,
     _generate_hoare_proof,
     _generate_invariant_ce_explanation,
+    z3_parse_expr,
 )
 
 
@@ -117,7 +118,7 @@ extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
 **Syntax-Hinweise:**
 - C-Syntax (`&&`, `||`, `!`) wird automatisch nach Python konvertiert
 - Angabe-Format: `{Pre}` Code `{Post}` (geschwungene Klammern)
-- Für die Invariante: Python/Z3-Syntax, z.B. `And(i >= 2, i <= 10)`
+- Für die Invariante: C-Syntax (`i >= 2 && i < 10`), Python (`i >= 2 and i < 10`), Z3 (`And(i >= 2, i <= 10)`) oder Chained (`l*l <= n < r*r`) — alles wird automatisch übersetzt
 """)
 
     triple_input = st.text_area(
@@ -189,7 +190,7 @@ extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
         if has_while:
             inv_default = st.session_state.get("triple_inv_prefill", "")
             inv_I = st.text_input(
-                "Loop-Invariante I (Z3-Syntax, z.B. `And(i >= 2, i <= 10)`)",
+                "Loop-Invariante I (C: `i>=2 && i<10`, Python: `i>=2 and i<10`, Z3: `And(i>=2,i<=10)`, Chained: `l*l<=n<r*r`)",
                 value=inv_default,
                 key="triple_inv",
                 help="Tippe deine Vermutung ein — Z3 prüft Init, Erhaltung, Konsequenz."
@@ -210,54 +211,7 @@ extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
                         "True": BoolVal(True), "False": BoolVal(False)}
 
                 def parse_z3(s):
-                    import re as _re
-                    s = s.strip()
-                    if s.lower() in ('true', 'true}', '{true'):
-                        return BoolVal(True)
-                    if s.lower() in ('false', 'false}', '{false'):
-                        return BoolVal(False)
-                    # Replace Python bool operators with Z3 equivalents
-                    # Wrap in And()/Or() only when bare and/or appears (not inside strings)
-                    # Simple approach: split on ' and '/' or ' and wrap
-                    def _z3ify(expr):
-                        # not X → Not(X)
-                        expr = _re.sub(r'\bnot\s+', 'Not(', expr) + (')' * len(_re.findall(r'\bnot\s+', expr)))
-                        # X and Y → And(X, Y) — handle via eval with z3ns which has And/Or
-                        return expr
-                    # Better: just replace bare and/or since z3ns doesn't have them
-                    s2 = _re.sub(r'\band\b', ' and ', s)  # keep as-is — instead override in ns
-                    ns = dict(z3ns)
-                    # Inject Python-friendly wrappers that work with Z3
-                    def _and(*args): return And(*args)
-                    def _or(*args):  return Or(*args)
-                    # Can't override 'and'/'or' keywords — use __builtins__ trick
-                    # Instead: rewrite expression to use And()/Or()
-                    def rewrite(expr):
-                        # Split on top-level ' and ' / ' or '
-                        # Simplest reliable approach: compile to ast and rewrite
-                        import ast as _ast2
-                        try:
-                            tree = _ast2.parse(expr, mode='eval')
-                        except SyntaxError:
-                            return expr
-                        class BoolOpRewriter(_ast2.NodeTransformer):
-                            def visit_BoolOp(self, node):
-                                self.generic_visit(node)
-                                func = 'And' if isinstance(node.op, _ast2.And) else 'Or'
-                                return _ast2.Call(
-                                    func=_ast2.Name(id=func, ctx=_ast2.Load()),
-                                    args=node.values, keywords=[])
-                            def visit_UnaryOp(self, node):
-                                self.generic_visit(node)
-                                if isinstance(node.op, _ast2.Not):
-                                    return _ast2.Call(
-                                        func=_ast2.Name(id='Not', ctx=_ast2.Load()),
-                                        args=[node.operand], keywords=[])
-                                return node
-                        new_tree = _ast2.fix_missing_locations(BoolOpRewriter().visit(tree))
-                        return compile(new_tree, '<string>', 'eval')
-                    compiled = rewrite(s)
-                    return eval(compiled, ns)
+                    return z3_parse_expr(s, z3ns)
 
                 Pre  = parse_z3(pre_str)
                 Post = parse_z3(post_str)

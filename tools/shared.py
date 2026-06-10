@@ -1281,6 +1281,77 @@ def _eliminate_quantifiers(formula_str: str):
     return {"original": str(fml), "qe": qe_txt, "simplified": str(simplified)}
 
 
+# ── Z3 expression parser (accepts C-syntax, Python-syntax, chained compares) ──
+
+def z3_parse_expr(s: str, z3ns: dict):
+    """
+    Parse a logical/arithmetic expression into a Z3 expression.
+    Accepts:
+      - C-syntax:      i > 1 && i < 10,  l*l <= n,  !(i == 0)
+      - Python-syntax: i > 1 and i < 10, not i == 0
+      - Z3-syntax:     And(i >= 2, i <= 10)
+      - Chained:       l*l <= n < r*r   (rewritten to And(l*l<=n, n<r*r))
+    """
+    import re as _re
+
+    s = s.strip()
+    if s.lower() == 'true':
+        from z3 import BoolVal
+        return BoolVal(True)
+    if s.lower() == 'false':
+        from z3 import BoolVal
+        return BoolVal(False)
+
+    # C → Python operator conversion
+    s = _re.sub(r'&&', ' and ', s)
+    s = _re.sub(r'\|\|', ' or ', s)
+    # ! not followed by = → not
+    s = _re.sub(r'!(?!=)', 'not ', s)
+
+    import ast as _ast
+    from z3 import And, Or, Not
+
+    try:
+        tree = _ast.parse(s, mode='eval')
+    except SyntaxError:
+        return eval(s, z3ns)
+
+    class _Rewriter(_ast.NodeTransformer):
+        def visit_BoolOp(self, node):
+            self.generic_visit(node)
+            fn = 'And' if isinstance(node.op, _ast.And) else 'Or'
+            return _ast.Call(
+                func=_ast.Name(id=fn, ctx=_ast.Load()),
+                args=node.values, keywords=[])
+
+        def visit_UnaryOp(self, node):
+            self.generic_visit(node)
+            if isinstance(node.op, _ast.Not):
+                return _ast.Call(
+                    func=_ast.Name(id='Not', ctx=_ast.Load()),
+                    args=[node.operand], keywords=[])
+            return node
+
+        def visit_Compare(self, node):
+            self.generic_visit(node)
+            # Rewrite chained comparisons: a <= b < c → And(a<=b, b<c)
+            if len(node.ops) == 1:
+                return node
+            # Build And(a op1 b, b op2 c, ...)
+            parts = []
+            left = node.left
+            for op, right in zip(node.ops, node.comparators):
+                parts.append(_ast.Compare(left=left, ops=[op], comparators=[right]))
+                left = right
+            return _ast.Call(
+                func=_ast.Name(id='And', ctx=_ast.Load()),
+                args=parts, keywords=[])
+
+    new_tree = _ast.fix_missing_locations(_Rewriter().visit(tree))
+    compiled = compile(new_tree, '<z3_parse>', 'eval')
+    return eval(compiled, z3ns)
+
+
 # ── Hoare / WP helpers ────────────────────────────────────────────────────
 
 def _wp_of_stmts(stmts, post, vars_dict, z3ns, steps, depth=0):
@@ -1488,34 +1559,7 @@ def _generate_hoare_proof(
     z3ns = {**vars_dict, "And": And, "Or": Or, "Not": Not, "Implies": Implies, "BoolVal": BoolVal}
 
     def _eval_z3(s):
-        """Eval a string as a Z3 expression, rewriting and/or/not via AST."""
-        import ast as _ast2
-        s = s.strip()
-        if s.lower() == 'true':  return BoolVal(True)
-        if s.lower() == 'false': return BoolVal(False)
-        try:
-            tree2 = _ast2.parse(s, mode='eval')
-        except SyntaxError:
-            return eval(s, z3ns)
-
-        class _BoolRewriter(_ast2.NodeTransformer):
-            def visit_BoolOp(self, node):
-                self.generic_visit(node)
-                fn = 'And' if isinstance(node.op, _ast2.And) else 'Or'
-                return _ast2.Call(func=_ast2.Name(id=fn, ctx=_ast2.Load()),
-                                  args=node.values, keywords=[])
-            def visit_UnaryOp(self, node):
-                self.generic_visit(node)
-                if isinstance(node.op, _ast2.Not):
-                    return _ast2.Call(func=_ast2.Name(id='Not', ctx=_ast2.Load()),
-                                      args=[node.operand], keywords=[])
-                return node
-
-        new_tree = _ast2.fix_missing_locations(_BoolRewriter().visit(tree2))
-        compiled = compile(new_tree, '<z3eval>', 'eval')
-        return eval(compiled, z3ns)
-
-    _safe_eval = _eval_z3
+        return z3_parse_expr(s, z3ns)
 
     try:
         I    = _eval_z3(invariant_str)
@@ -1624,8 +1668,9 @@ def _generate_hoare_proof(
                   *[v >= 0 for v in vars_dict.values()],
                   Not(wp_body))
         ))
-        out.append(f"while ({cond_str}) {{")
-        out.append(f"    {{{_fmt(I)} ∧ {cond_str}}}")
+        cond_pretty = cond_str.replace(' and ', ' ∧ ').replace(' or ', ' ∨ ').replace('not ', '¬')
+        out.append(f"while ({cond_pretty}) {{")
+        out.append(f"    {{{_fmt(I)} ∧ {cond_pretty}}}")
         out.append(f"        ← While-Regel: I ∧ B gilt am Schleifeneingang")
         for s2 in body_stmts:
             if isinstance(s2, ast.Assign):
@@ -1639,7 +1684,7 @@ def _generate_hoare_proof(
         out.append(f"}}")
 
         # Exit annotation
-        out.append(f"{{{_fmt(I)} ∧ ¬({cond_str})}}")
+        out.append(f"{{{_fmt(I)} ∧ ¬({cond_pretty})}}")
         out.append(f"    ← While-Regel: I bleibt, B ist falsch")
 
         conseq_ok = _check(lambda s: (
