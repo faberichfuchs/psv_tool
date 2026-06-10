@@ -91,6 +91,43 @@ Danach CTL-Formeln eingeben, z.B. `EG(b)`, `AF(AG(b))`, `A(a U b)`.
 - **SAT:** Z3-Formel eingeben, z.B. `And(Or(x1, x2), Or(Not(x1), Not(x2)))`
 - **EUF:** Gleichungen mit uninterpretierten Funktionen, z.B. `And(f(a) == f(b), a != b)`
 
+### Theory Chat (optional — lokales LLM)
+
+Der Theory-Chat-Tab beantwortet Theorie-Fragen über ein lokales LLM, das auf deinen Vorlesungsfolien basiert.
+
+**Einmalige Einrichtung:**
+
+**1. Ollama installieren:** https://ollama.com/download
+
+**2. Modelle herunterladen**
+```bash
+ollama pull nomic-embed-text   # Embedding-Modell (~274 MB)
+ollama pull qwen2.5:14b        # Chat-Modell (~9 GB, empfohlen)
+# Alternativ kleiner: ollama pull qwen2.5:7b  (~4.5 GB)
+```
+
+**3. Zusätzliche Python-Pakete installieren**
+```bash
+pip install llama-index llama-index-vector-stores-chroma \
+            llama-index-embeddings-ollama llama-index-llms-ollama
+```
+
+**4. Vorlesungsfolien ablegen**
+
+PDFs in den Ordner `material/` legen (Unterordner erlaubt). Der Pfad ist in `tools/shared.py` als `MATERIAL_DIR` konfiguriert — bei Bedarf anpassen.
+
+**5. Index aufbauen** *(einmalig, ~2–5 Min)*
+```bash
+python scripts/build_index.py
+```
+Erzeugt `chroma_db/` im Projektverzeichnis (in `.gitignore`, wird nicht gepusht).
+
+**6. Ollama beim App-Start laufen lassen**
+```bash
+ollama serve   # im Hintergrund starten
+python -m streamlit run app.py
+```
+
 ---
 
 ## Tests ausführen

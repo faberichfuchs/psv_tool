@@ -709,19 +709,54 @@ Für ein unabhängiges Paar wird benötigt:
 
     import ast as _ast
 
-    def _extract_func_name(py_src):
-        """Extract the first function name from Python source."""
+    def _extract_func_info(py_src):
+        """Return (func_name, n_params) of the first function in source."""
         try:
             tree = _ast.parse(py_src)
             for node in _ast.walk(tree):
                 if isinstance(node, _ast.FunctionDef):
-                    return node.name
+                    return node.name, len(node.args.args)
         except Exception:
             pass
-        return None
+        return None, 1
 
-    def _auto_candidates(func_name, n_max):
-        return [f"{func_name}({i})" for i in range(n_max + 1)]
+    def _extract_func_name(py_src):
+        name, _ = _extract_func_info(py_src)
+        return name
+
+    def _auto_candidates(func_name, n_max, n_params=1):
+        vals = list(range(n_max + 1))
+        if n_params == 1:
+            return [f"{func_name}({i})" for i in vals]
+        if n_params == 2:
+            return [f"{func_name}({i}, {j})" for i in vals for j in vals]
+        # 3+ params: single value per param (combinatorial explosion too large)
+        return [f"{func_name}({', '.join([str(i)]*n_params)})" for i in vals]
+
+    def _mcdc_obligations_for_suite(py_src, test_cases):
+        """Return set of (decision_id, atom_id) pairs with a witness in the suite."""
+        try:
+            instr, meta = _build_instrumented_code_for_decisions(py_src)
+        except Exception:
+            return {}, set(), set()
+        decision_log = {}
+        for tc in test_cases:
+            try:
+                _run_tests_for_code(instr, [tc], decision_log=decision_log)
+            except Exception:
+                pass
+        covered = set()
+        total = set()
+        for did, dmeta in meta.items():
+            n_atoms = len(dmeta["atoms"])
+            evals = decision_log.get(did, {}).get("evals", [])
+            _, witnesses = _mcdc_result_for_decision(evals, n_atoms)
+            for atom_id in range(n_atoms):
+                key = (did, atom_id, dmeta["atoms"][atom_id])
+                total.add(key)
+                if witnesses.get(atom_id) is not None:
+                    covered.add(key)
+        return meta, covered, total
 
     def _run_minimal_analysis():
         _py = st.session_state.get("_cov_py", code_input)
@@ -733,16 +768,84 @@ Für ein unabhängiges Paar wird benötigt:
             return
 
         existing = [t.strip() for t in existing_raw.strip().splitlines() if t.strip()]
-        func_name = _extract_func_name(_py)
+        func_name, n_params = _extract_func_info(_py)
         if not func_name:
             st.warning("Funktionsname konnte nicht erkannt werden.")
             return
 
-        candidates = _auto_candidates(func_name, n_max)
-        # Remove existing from candidates pool to avoid overlap
+        candidates = _auto_candidates(func_name, n_max, n_params)
         extra_candidates = [c for c in candidates if c not in existing]
         all_candidates = existing + extra_candidates
 
+        # ── MC/DC: separate path ──────────────────────────────────────────────
+        if criterion == "MC/DC":
+            try:
+                dmeta, already_cov, total_obligs = _mcdc_obligations_for_suite(_py, existing)
+                if not total_obligs:
+                    st.info("Keine Decisions/Atoms in dieser Funktion gefunden.")
+                    return
+
+                st.markdown(f"**Bestehende Testfälle** decken **{len(already_cov)}/{len(total_obligs)}** MC/DC-Obligationen")
+
+                # Coverage per candidate
+                tc_cov = {}
+                for tc in all_candidates:
+                    _, cov, _ = _mcdc_obligations_for_suite(_py, existing + ([tc] if tc not in existing else []))
+                    tc_cov[tc] = cov
+
+                remaining = total_obligs - already_cov
+                selected = []
+                pool = list(extra_candidates)
+                while remaining and pool:
+                    best = max(pool, key=lambda t: len(tc_cov.get(t, set()) & remaining))
+                    gain = tc_cov.get(best, set()) & remaining
+                    if not gain:
+                        break
+                    selected.append(best)
+                    remaining -= gain
+                    pool = [c for c in pool if c != best]
+
+                if not remaining:
+                    if not selected:
+                        st.success("✅ MC/DC bereits vollständig abgedeckt.")
+                    else:
+                        st.success(f"✅ MC/DC vollständig mit **{len(selected)}** zusätzlichem Testfall:")
+                        cumcov = set(already_cov)
+                        for i, tc in enumerate(selected, 1):
+                            new = tc_cov.get(tc, set()) - cumcov
+                            cumcov |= new
+                            atoms_str = ", ".join(f"D{did} atom[{aid}] `{atxt}`" for did, aid, atxt in sorted(new))
+                            st.markdown(f"**+T{i}:** `{tc}` — deckt: {atoms_str or '–'}")
+                else:
+                    coverable = set()
+                    for cov in tc_cov.values():
+                        coverable |= cov
+                    infeasible = remaining - coverable
+                    if selected:
+                        covered_so_far = len(total_obligs) - len(remaining)
+                        st.warning(f"⚠ Mit {len(selected)} Ergänzung(en): {covered_so_far}/{len(total_obligs)} abgedeckt.")
+                        cumcov = set(already_cov)
+                        for i, tc in enumerate(selected, 1):
+                            new = tc_cov.get(tc, set()) - cumcov
+                            cumcov |= new
+                            st.markdown(f"**+T{i}:** `{tc}`")
+                    if infeasible:
+                        st.error(f"❌ {len(infeasible)} MC/DC-Obligation(en) nicht erreichbar (n=0..{n_max}):")
+                        for did, aid, atxt in sorted(infeasible):
+                            lineno = dmeta.get(did, {}).get("lineno", "?")
+                            st.markdown(f"  ❌ D{did} Z.{lineno} atom[{aid}] `{atxt}`: kein unabhängiges Paar möglich")
+
+                with st.expander("Details: MC/DC-Obligationen"):
+                    for did, aid, atxt in sorted(total_obligs):
+                        lineno = dmeta.get(did, {}).get("lineno", "?")
+                        ok = (did, aid, atxt) in already_cov
+                        st.markdown(f"{'✅' if ok else '❌'} D{did} Z.{lineno} atom[{aid}] `{atxt}`")
+            except Exception as e:
+                st.error(f"Fehler: {e}")
+                st.code(traceback.format_exc())
+            return
+
+        # ── Dataflow criteria ─────────────────────────────────────────────────
         try:
             res = _find_minimal_test_suite(_py, all_candidates, criterion, fixed=existing)
             selected_new = res["selected"]
@@ -765,7 +868,6 @@ Für ein unabhängiges Paar wird benötigt:
                         extra = res["tc_coverage"][tc] - already
                         st.markdown(f"**+T{i}:** `{tc}` — deckt zusätzlich {len(extra)} Obligation(en)")
             else:
-                # Check if uncovered is due to infeasibility (no candidate covers it)
                 coverable_by_any = set()
                 for tc, cov in res["tc_coverage"].items():
                     coverable_by_any |= cov
@@ -780,8 +882,11 @@ Für ein unabhängiges Paar wird benötigt:
 
                 if truly_infeasible:
                     st.error(f"❌ {len(truly_infeasible)} Obligation(en) **nicht erreichbar** (infeasible path — kein Kandidat n=0..{n_max} deckt sie):")
-                    for var, d, u in sorted(truly_infeasible):
-                        st.markdown(f"  ❌ `{var}`: Z.{d} → Z.{u}")
+                    for item in sorted(truly_infeasible):
+                        if len(item) == 2:
+                            st.markdown(f"  ❌ `{item[0]}`: def@Z.{item[1]}")
+                        else:
+                            st.markdown(f"  ❌ `{item[0]}`: Z.{item[1]} → Z.{item[2]}")
                 if fixable_with_more:
                     st.info(f"ℹ {len(fixable_with_more)} Obligation(en) bräuchten n>{n_max} — Range erhöhen.")
 
@@ -805,7 +910,7 @@ Für ein unabhängiges Paar wird benötigt:
     with col_min1:
         st.selectbox(
             "Criterion",
-            ["all-defs", "all-c-uses", "all-p-uses", "all-uses", "all-c-uses/some-p-uses", "all-p-uses/some-c-uses", "some-c-uses", "some-p-uses"],
+            ["all-defs", "all-c-uses", "all-p-uses", "all-uses", "all-c-uses/some-p-uses", "all-p-uses/some-c-uses", "some-c-uses", "some-p-uses", "MC/DC"],
             key="min_criterion",
         )
     with col_min2:
