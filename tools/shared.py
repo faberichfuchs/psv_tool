@@ -715,19 +715,56 @@ def _trace_dataflow_coverage(source_code: str, test_cases: list):
     # all-defs: aggregate at (var, def_line) level — satisfied if ANY use covered
     all_def_pairs = {(v, d) for v, d, u in all_defs_obligs}
     covered_def_pairs = {(v, d) for v, d, u in covered_defs} & all_def_pairs
+    p_def_pairs = {(v, d) for v, d, u in all_p_uses_obligs}
+    c_def_pairs = {(v, d) for v, d, u in all_c_uses_obligs}
+
+    def _mixed_criterion(primary_obligs, primary_covered, fallback_obligs, fallback_covered):
+        """all-X/some-Y: all X edges + for defs with no X, ≥1 Y edge."""
+        primary_defs = {(v, d) for v, d, u in primary_obligs}
+        fallback_defs = {(v, d) for v, d, u in fallback_obligs}
+        obligs: set = set(primary_obligs)
+        covered: set = set(primary_obligs & primary_covered)
+        for vd in fallback_defs - primary_defs:
+            sentinel = (vd[0], vd[1], "some")
+            obligs.add(sentinel)
+            if any(e[0] == vd[0] and e[1] == vd[1] for e in fallback_covered):
+                covered.add(sentinel)
+        return {"covered": covered, "missing": obligs - covered}
+
+    cov_c = covered_cuses & all_c_uses_obligs
+    cov_p = covered_puses & all_p_uses_obligs
+
     return {
         "all_defs": {
-            "covered": covered_def_pairs,    # 2-tuples (var, def_line)
+            "covered": covered_def_pairs,
             "missing": all_def_pairs - covered_def_pairs,
         },
         "all_c_uses": {
-            "covered": covered_cuses & all_c_uses_obligs,    # 3-tuples
-            "missing": all_c_uses_obligs - covered_cuses,
+            "covered": cov_c,
+            "missing": all_c_uses_obligs - cov_c,
         },
         "all_p_uses": {
-            "covered": covered_puses & all_p_uses_obligs,    # 3-tuples
-            "missing": all_p_uses_obligs - covered_puses,
+            "covered": cov_p,
+            "missing": all_p_uses_obligs - cov_p,
         },
+        "all_uses": {
+            "covered": cov_c | cov_p,
+            "missing": (all_c_uses_obligs | all_p_uses_obligs) - (cov_c | cov_p),
+        },
+        "some_c_uses": {
+            "covered": {(v, d) for v, d, u in cov_c},
+            "missing": c_def_pairs - {(v, d) for v, d, u in cov_c},
+        },
+        "some_p_uses": {
+            "covered": {(v, d) for v, d, u in cov_p},
+            "missing": p_def_pairs - {(v, d) for v, d, u in cov_p},
+        },
+        "all_p_uses_some_c_uses": _mixed_criterion(
+            all_p_uses_obligs, cov_p, all_c_uses_obligs, cov_c
+        ),
+        "all_c_uses_some_p_uses": _mixed_criterion(
+            all_c_uses_obligs, cov_c, all_p_uses_obligs, cov_p
+        ),
     }
 
 

@@ -580,6 +580,57 @@ Für ein unabhängiges Paar wird benötigt:
     _df_static = st.session_state.get("_df_static")
 
     if _df_res and _df_tests:
+        _DF_EXPLAIN = {
+            "all-defs": {
+                "def": "Jede **Definition** (Zuweisung) jeder Variablen muss von mindestens einem Testfall **erreicht** werden — egal ob sie danach in einem C-Use oder P-Use erscheint.",
+                "key": "def-use Kante (var, def-Zeile)",
+                "pos": "**✅ Erfüllt** — jede Definition jeder Variablen wurde von mindestens einem Testfall ausgeführt.\n\nBegründung: Für jede Variable `v` und jede Zeile `d`, an der `v` definiert wird, gibt es einen Testfall, der diese Zuweisung ausführt.",
+                "neg": "**❌ Nicht erfüllt** — folgende Definitionen wurden von keinem Testfall erreicht:\n\n{missing_list}\n\nBegründung: Kein Testfall führt die Zuweisung von `{vars}` in Zeile `{lines}` aus. Damit existiert ein Programmteil, der vollständig ungetestet bleibt.",
+            },
+            "all-c-uses": {
+                "def": "Jede **computational use (c-use)** jeder (Variable, Definition)-Kombination muss abgedeckt sein. Eine c-use liegt vor, wenn eine Variable in einem **Ausdruck** (Zuweisung, Rückgabewert) ohne direkten Einfluss auf den Kontrollfluss verwendet wird.\n\nObligation: `(var, def-Zeile, use-Zeile)` — der Wert der in Zeile `def` definierten Variable muss in Zeile `use` im Rahmen einer Berechnung verwendet werden.",
+                "key": "def-use Kante (var, def-Zeile, use-Zeile)",
+                "pos": "**✅ Erfüllt** — alle c-use-Kanten wurden abgedeckt.\n\nBegründung: Für jede Variable und jede Definition gibt es einen Testfall, der einen Ausführungspfad nimmt, bei dem der definierte Wert in einer Berechnung (nicht Verzweigung) verwendet wird.",
+                "neg": "**❌ Nicht erfüllt** — folgende c-use-Kanten wurden nicht abgedeckt:\n\n{missing_list}\n\nBegründung: Kein Testfall nimmt einen Pfad von der Definition von `{vars}` in Zeile `{defs}` bis zur Verwendung in Zeile `{uses}` als Rechenwert.",
+            },
+            "all-p-uses": {
+                "def": "Jede **predicate use (p-use)** jeder (Variable, Definition)-Kombination muss abgedeckt sein. Eine p-use liegt vor, wenn eine Variable in einer **Bedingung** (if, while) verwendet wird — d.h. ihr Wert beeinflusst den Kontrollfluss direkt.\n\nObligation: `(var, def-Zeile, branch-Zeile)` — der Wert der in Zeile `def` definierten Variable bestimmt in Zeile `branch` welchen Pfad das Programm nimmt.",
+                "key": "def-use Kante (var, def-Zeile, branch-Zeile)",
+                "pos": "**✅ Erfüllt** — alle p-use-Kanten wurden abgedeckt.\n\nBegründung: Für jede Variable und jede Definition gibt es einen Testfall, der einen Ausführungspfad nimmt, bei dem der definierte Wert eine Verzweigungsentscheidung beeinflusst.",
+                "neg": "**❌ Nicht erfüllt** — folgende p-use-Kanten wurden nicht abgedeckt:\n\n{missing_list}\n\nBegründung: Kein Testfall nimmt einen Pfad von der Definition von `{vars}` in Zeile `{defs}` bis zur Bedingungsauswertung in Zeile `{uses}`.",
+            },
+            "all-uses": {
+                "def": "**All-uses** ist die Vereinigung von all-c-uses und all-p-uses: jede (Variable, Definition)-Kombination muss sowohl in allen c-uses als auch in allen p-uses abgedeckt sein. Stärkste der Standard-Abdeckungskriterien für Datenfluss.",
+                "key": "def-use Kante (var, def-Zeile, use-Zeile)",
+                "pos": "**✅ Erfüllt** — alle c-use- und p-use-Kanten wurden abgedeckt.\n\nBegründung: Jede Definition jeder Variablen wurde sowohl in rechnerischer Verwendung als auch in Bedingungsverwendung abgedeckt.",
+                "neg": "**❌ Nicht erfüllt** — folgende def-use-Kanten wurden nicht abgedeckt:\n\n{missing_list}\n\nBegründung: Mindestens eine Definition von `{vars}` hat eine c-use oder p-use, die kein Testfall abdeckt.",
+            },
+            "some-c-uses": {
+                "def": "Für jede (Variable, Definition) muss **mindestens eine** c-use abgedeckt werden — aber nicht alle. Schwächeres Kriterium als all-c-uses: es reicht ein einziger Testfall, der irgendeinen Rechenpfad nach der Definition nimmt.",
+                "key": "(var, def-Zeile) — ≥1 c-use abgedeckt",
+                "pos": "**✅ Erfüllt** — für jede Definition jeder Variablen wurde mindestens eine c-use abgedeckt.\n\nBegründung: Jede Zuweisung einer Variable ist in mindestens einem Testfall in einer Berechnung angekommen.",
+                "neg": "**❌ Nicht erfüllt** — für folgende Definitionen wurde keine c-use abgedeckt:\n\n{missing_list}\n\nBegründung: Für `{vars}` def@Z.{lines} nimmt kein Testfall einen Pfad, der diesen Wert rechnerisch verwendet.",
+            },
+            "some-p-uses": {
+                "def": "Für jede (Variable, Definition) muss **mindestens eine** p-use abgedeckt werden. Schwächeres Kriterium als all-p-uses: es reicht ein einziger Testfall, der irgendeinen Bedingungspfad nach der Definition nimmt.",
+                "key": "(var, def-Zeile) — ≥1 p-use abgedeckt",
+                "pos": "**✅ Erfüllt** — für jede Definition jeder Variablen wurde mindestens eine p-use abgedeckt.\n\nBegründung: Jede Zuweisung einer Variable ist in mindestens einem Testfall in einer Verzweigungsentscheidung angekommen.",
+                "neg": "**❌ Nicht erfüllt** — für folgende Definitionen wurde keine p-use abgedeckt:\n\n{missing_list}\n\nBegründung: Für `{vars}` def@Z.{lines} nimmt kein Testfall einen Pfad, der diesen Wert in einer Bedingung auswertet.",
+            },
+            "all-p-uses/some-c-uses": {
+                "def": "**Hybrides Kriterium:** Für jede (Variable, Definition) — falls p-uses existieren: **alle** p-uses abdecken. Falls keine p-uses existieren: mindestens **eine** c-use abdecken. Wichtig: Wenn p-uses vorhanden sind, wird some-c-uses für diese (var,def) ignoriert.",
+                "key": "p-use Kante oder (var,def) falls nur c-uses vorhanden",
+                "pos": "**✅ Erfüllt** — alle p-use-Kanten wurden abgedeckt; für reine c-use-Variablen wurde mindestens eine c-use abgedeckt.\n\nBegründung: Das Kriterium ist eine Spezialisierung von all-p-uses mit Fallback auf some-c-uses.",
+                "neg": "**❌ Nicht erfüllt** — folgende Obligationen wurden nicht erfüllt:\n\n{missing_list}\n\nBegründung: Entweder fehlt eine p-use-Kante für `{vars}`, oder — weil nur c-uses existieren — wurde kein einziger Rechenpfad nach der Definition abgedeckt.",
+            },
+            "all-c-uses/some-p-uses": {
+                "def": "**Hybrides Kriterium (Spiegelbild):** Für jede (Variable, Definition) — falls c-uses existieren: **alle** c-uses abdecken. Falls keine c-uses existieren: mindestens **eine** p-use abdecken. Wichtig: Wenn c-uses vorhanden sind, wird some-p-uses für diese (var,def) ignoriert.",
+                "key": "c-use Kante oder (var,def) falls nur p-uses vorhanden",
+                "pos": "**✅ Erfüllt** — alle c-use-Kanten wurden abgedeckt; für reine p-use-Variablen wurde mindestens eine p-use abgedeckt.\n\nBegründung: Das Kriterium ist eine Spezialisierung von all-c-uses mit Fallback auf some-p-uses.",
+                "neg": "**❌ Nicht erfüllt** — folgende Obligationen wurden nicht erfüllt:\n\n{missing_list}\n\nBegründung: Entweder fehlt eine c-use-Kante für `{vars}`, oder — weil nur p-uses existieren — wurde kein einziger Bedingungspfad nach der Definition abgedeckt.",
+            },
+        }
+
         def _show_df_coverage(label, cov_data, is_def_level=False):
             """is_def_level=True: obligations are (var,def) 2-tuples (all-defs/some-* criteria)."""
             covered = sorted(cov_data["covered"])
@@ -598,6 +649,34 @@ Für ein unabhängiges Paar wird benötigt:
                     st.markdown(f"  ✅ `{var}`: Z.{d} → Z.{u}")
                 for var, d, u in missing:
                     st.markdown(f"  ❌ `{var}`: Z.{d} → Z.{u} ← **fehlt**")
+            exp = _DF_EXPLAIN.get(label)
+            if exp:
+                with st.expander(f"📝 {label} — Prüfungs-Erklärung", expanded=bool(missing)):
+                    st.markdown(f"**Was ist {label}?**\n\n{exp['def']}")
+                    st.markdown("---")
+                    if not missing:
+                        st.success(exp["pos"])
+                    else:
+                        if is_def_level:
+                            missing_list = "\n".join(f"- `{v}` def@Z.{d}" for v, d in missing)
+                            vars_ = ", ".join(sorted(set(v for v, _ in missing)))
+                            lines_ = ", ".join(sorted(set(str(d) for _, d in missing)))
+                            txt = exp["neg"].format(missing_list=missing_list, vars=vars_, lines=lines_, defs=lines_, uses=lines_)
+                        else:
+                            missing_list = "\n".join(f"- `{v}`: Z.{d} → Z.{u}" for v, d, u in missing if len((v,d,u)) == 3)
+                            # handle sentinel tuples (var, def, "some")
+                            missing_all = []
+                            for item in missing:
+                                if len(item) == 3 and item[2] == "some":
+                                    missing_all.append(f"- `{item[0]}` def@Z.{item[1]} → (keine Use abgedeckt)")
+                                else:
+                                    missing_all.append(f"- `{item[0]}`: Z.{item[1]} → Z.{item[2]}")
+                            missing_list = "\n".join(missing_all)
+                            vars_ = ", ".join(sorted(set(item[0] for item in missing)))
+                            defs_ = ", ".join(sorted(set(str(item[1]) for item in missing)))
+                            uses_ = ", ".join(sorted(set(str(item[2]) for item in missing if item[2] != "some")))
+                            txt = exp["neg"].format(missing_list=missing_list, vars=vars_, defs=defs_, uses=uses_ or "—", lines=defs_)
+                        st.error(txt)
 
         st.caption(f"Testfälle: `{'`, `'.join(_df_tests)}`")
         _show_df_coverage("all-defs", _df_res["all_defs"], is_def_level=True)
@@ -605,6 +684,16 @@ Für ein unabhängiges Paar wird benötigt:
         _show_df_coverage("all-c-uses", _df_res["all_c_uses"])
         st.divider()
         _show_df_coverage("all-p-uses", _df_res["all_p_uses"])
+        st.divider()
+        _show_df_coverage("all-uses", _df_res["all_uses"])
+        st.divider()
+        _show_df_coverage("some-c-uses", _df_res["some_c_uses"], is_def_level=True)
+        st.divider()
+        _show_df_coverage("some-p-uses", _df_res["some_p_uses"], is_def_level=True)
+        st.divider()
+        _show_df_coverage("all-p-uses/some-c-uses", _df_res["all_p_uses_some_c_uses"])
+        st.divider()
+        _show_df_coverage("all-c-uses/some-p-uses", _df_res["all_c_uses_some_p_uses"])
 
         if _df_static:
             with st.expander("Statische Obligationen (alle möglichen Def-Use Kanten)"):
