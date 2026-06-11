@@ -461,7 +461,7 @@ def render():
                         "True": BoolVal(True), "False": BoolVal(False)}
 
                 def parse(s):
-                    return eval(s, z3ns)
+                    return z3_parse_expr(s, z3ns)
 
                 def wp_of_assignments(stmts_text, post):
                     assignments = []
