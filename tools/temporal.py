@@ -90,6 +90,34 @@ def render():
             key="ctl_formula"
         )
 
+    # ── Live-Graphvorschau ────────────────────────────────────────────────
+    with st.expander("🗺️ Kripke-Graph Vorschau", expanded=True):
+        try:
+            _gv_lines = ["digraph {", '    rankdir=LR;', '    node [shape=circle];']
+            _gv_states = [s.strip() for s in ctl_states_in.split(",") if s.strip()]
+            _gv_init   = [s.strip() for s in ctl_init_in.split(",") if s.strip()]
+            _gv_labels: dict = {}
+            for _line in ctl_labels_in.strip().splitlines():
+                if ":" in _line:
+                    _s, _aps = _line.split(":", 1)
+                    _gv_labels[_s.strip()] = [a.strip() for a in _aps.split(",") if a.strip()]
+            for _s in _gv_states:
+                _aps = _gv_labels.get(_s, [])
+                _label = f"{_s}\\n{{{', '.join(_aps)}}}" if _aps else _s
+                _shape = "doublecircle" if _s in _gv_init else "circle"
+                _gv_lines.append(f'    {_s} [label="{_label}" shape={_shape}];')
+            for _line in ctl_trans_in.strip().splitlines():
+                _line = _line.strip()
+                for _sep in ("->", "→"):
+                    if _sep in _line:
+                        _src, _dst = _line.split(_sep, 1)
+                        _gv_lines.append(f'    {_src.strip()} -> {_dst.strip()};')
+                        break
+            _gv_lines.append("}")
+            st.graphviz_chart("\n".join(_gv_lines))
+        except Exception as _ge:
+            st.caption(f"Vorschau nicht verfügbar: {_ge}")
+
     if st.button("Formel prüfen ✓", type="primary", key="ctl_check_btn"):
         try:
             states_list = [s.strip() for s in ctl_states_in.split(",") if s.strip()]
