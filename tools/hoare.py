@@ -116,9 +116,19 @@ def _render_triple_solver():
 extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
 
 **Syntax-Hinweise:**
-- C-Syntax (`&&`, `||`, `!`) wird automatisch nach Python konvertiert
 - Angabe-Format: `{Pre}` Code `{Post}` (geschwungene Klammern)
-- Für die Invariante: C-Syntax (`i >= 2 && i < 10`), Python (`i >= 2 and i < 10`), Z3 (`And(i >= 2, i <= 10)`) oder Chained (`l*l <= n < r*r`) — alles wird automatisch übersetzt
+- C-Syntax im Code (`&&`, `||`, `!`) wird automatisch konvertiert
+
+**Erlaubte Schreibweisen für Pre, Post und Invariante:**
+
+| Operator | Schreibweisen |
+|---|---|
+| UND | `&&` · `and` · `And(a, b)` |
+| ODER | `\|\|` · `or` · `Or(a, b)` |
+| NICHT | `!x` · `not x` · `Not(x)` |
+| IMPLIKATION | `A => B` · `A ⇒ B` · `A -> B` · `Implies(A, B)` |
+| VERKETTUNG | `l*l <= n < r*r` → `And(l*l<=n, n<r*r)` |
+| WAHR/FALSCH | `true` · `false` |
 """)
 
     triple_input = st.text_area(
@@ -366,7 +376,18 @@ def render():
     if wp_mode == "Prüfungs-Triple lösen":
         _render_triple_solver()
     elif wp_mode == "Loop-Invariante prüfen":
-        st.markdown("""**Syntax:** Python-Ausdrücke mit Z3. Beispiel: `And(y == i, i >= 0, i <= n)`, `i < n`, `y == n`""")
+        st.info("""
+**Erlaubte Syntax für alle Ausdrucks-Felder (Pre, I, B, Q):**
+
+| Operator | Erlaubte Schreibweisen |
+|---|---|
+| UND | `&&` · `and` · `And(a, b)` |
+| ODER | `\\|\\|` · `or` · `Or(a, b)` |
+| NICHT | `!x` · `not x` · `Not(x)` |
+| IMPLIKATION | `A => B` · `A ⇒ B` · `A -> B` · `Implies(A, B)` |
+| VERKETTUNG | `l*l <= n < r*r` → wird zu `And(l*l<=n, n<r*r)` |
+| WAHR/FALSCH | `true` · `false` · `True` · `False` |
+""")
 
         # ── Code direkt einfügen (optional) ─────────────────────────────────
         with st.expander("📋 Code direkt einfügen (auto-parsen)", expanded=False):
