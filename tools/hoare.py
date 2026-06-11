@@ -434,18 +434,32 @@ def render():
                 except Exception as _e:
                     st.error(f"Parse-Fehler: {_e}")
 
+        # Set defaults only if not already set by code parser
+        if "inv_vars" not in st.session_state:
+            st.session_state["inv_vars"] = "n, y, i"
+        if "inv_pre" not in st.session_state:
+            st.session_state["inv_pre"] = "n >= 0"
+        if "inv_I" not in st.session_state:
+            st.session_state["inv_I"] = "And(y == i, i >= 0, i <= n)"
+        if "inv_B" not in st.session_state:
+            st.session_state["inv_B"] = "i < n"
+        if "inv_Q" not in st.session_state:
+            st.session_state["inv_Q"] = "y == n"
+        if "inv_init" not in st.session_state:
+            st.session_state["inv_init"] = "y = 0\ni = 0"
+        if "inv_body" not in st.session_state:
+            st.session_state["inv_body"] = "y = y + 1\ni = i + 1"
+
         col1, col2 = st.columns(2)
         with col1:
-            inv_vars   = st.text_input("Integer-Variablen (kommagetrennt)", value="n, y, i", key="inv_vars")
-            inv_pre    = st.text_input("Vorbedingung Pre", value="n >= 0", key="inv_pre")
-            inv_I      = st.text_input("Loop-Invariante I", value="And(y == i, i >= 0, i <= n)", key="inv_I")
-            inv_B      = st.text_input("Schleifenbedingung B", value="i < n", key="inv_B")
+            inv_vars   = st.text_input("Integer-Variablen (kommagetrennt)", key="inv_vars")
+            inv_pre    = st.text_input("Vorbedingung Pre", key="inv_pre")
+            inv_I      = st.text_input("Loop-Invariante I (C: `i>=2 && i<10`, Implies: `(b>x) => (a>y)`, Z3: `And(...)`, Chained: `l*l<=n<r*r`)", key="inv_I")
+            inv_B      = st.text_input("Schleifenbedingung B", key="inv_B")
         with col2:
-            inv_Q      = st.text_input("Nachbedingung Q", value="y == n", key="inv_Q")
-            inv_init   = st.text_area("Init-Code (vor Schleife, Python-Syntax)",
-                                      value="y = 0\ni = 0", height=80, key="inv_init")
-            inv_body   = st.text_area("Schleifenkörper (eine Zuweisung pro Zeile: var = expr)",
-                                      value="y = y + 1\ni = i + 1", height=80, key="inv_body")
+            inv_Q      = st.text_input("Nachbedingung Q", key="inv_Q")
+            inv_init   = st.text_area("Init-Code (vor Schleife, Python-Syntax)", height=80, key="inv_init")
+            inv_body   = st.text_area("Schleifenkörper (eine Zuweisung pro Zeile: var = expr)", height=80, key="inv_body")
 
         if st.button("Invariante prüfen ✓", type="primary", key="inv_check"):
             try:
