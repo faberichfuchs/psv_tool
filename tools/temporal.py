@@ -97,31 +97,36 @@ S = Zustände, S₀ = Anfangszustände, R ⊆ S×S = Übergänge (total!), L: S 
             key="ctl_formula"
         )
 
-    # ── Live-Graphvorschau ────────────────────────────────────────────────
+    # ── Kripke-Graph Vorschau (nur bei Struktur-Änderung neu rendern) ────────
+    @st.cache_data(show_spinner=False)
+    def _build_graphviz(states_str, init_str, trans_str, labels_str):
+        _gv_lines = ["digraph {", '    rankdir=LR;', '    node [shape=circle];']
+        _gv_states = [s.strip() for s in states_str.split(",") if s.strip()]
+        _gv_init   = [s.strip() for s in init_str.split(",") if s.strip()]
+        _gv_labels: dict = {}
+        for _line in labels_str.strip().splitlines():
+            if ":" in _line:
+                _s, _aps = _line.split(":", 1)
+                _gv_labels[_s.strip()] = [a.strip() for a in _aps.split(",") if a.strip()]
+        for _s in _gv_states:
+            _aps = _gv_labels.get(_s, [])
+            _label = f"{_s}\\n{{{', '.join(_aps)}}}" if _aps else _s
+            _shape = "doublecircle" if _s in _gv_init else "circle"
+            _gv_lines.append(f'    {_s} [label="{_label}" shape={_shape}];')
+        for _line in trans_str.strip().splitlines():
+            _line = _line.strip()
+            for _sep in ("->", "→"):
+                if _sep in _line:
+                    _src, _dst = _line.split(_sep, 1)
+                    _gv_lines.append(f'    {_src.strip()} -> {_dst.strip()};')
+                    break
+        _gv_lines.append("}")
+        return "\n".join(_gv_lines)
+
     with st.expander("🗺️ Kripke-Graph Vorschau", expanded=True):
         try:
-            _gv_lines = ["digraph {", '    rankdir=LR;', '    node [shape=circle];']
-            _gv_states = [s.strip() for s in ctl_states_in.split(",") if s.strip()]
-            _gv_init   = [s.strip() for s in ctl_init_in.split(",") if s.strip()]
-            _gv_labels: dict = {}
-            for _line in ctl_labels_in.strip().splitlines():
-                if ":" in _line:
-                    _s, _aps = _line.split(":", 1)
-                    _gv_labels[_s.strip()] = [a.strip() for a in _aps.split(",") if a.strip()]
-            for _s in _gv_states:
-                _aps = _gv_labels.get(_s, [])
-                _label = f"{_s}\\n{{{', '.join(_aps)}}}" if _aps else _s
-                _shape = "doublecircle" if _s in _gv_init else "circle"
-                _gv_lines.append(f'    {_s} [label="{_label}" shape={_shape}];')
-            for _line in ctl_trans_in.strip().splitlines():
-                _line = _line.strip()
-                for _sep in ("->", "→"):
-                    if _sep in _line:
-                        _src, _dst = _line.split(_sep, 1)
-                        _gv_lines.append(f'    {_src.strip()} -> {_dst.strip()};')
-                        break
-            _gv_lines.append("}")
-            st.graphviz_chart("\n".join(_gv_lines))
+            _dot = _build_graphviz(ctl_states_in, ctl_init_in, ctl_trans_in, ctl_labels_in)
+            st.graphviz_chart(_dot)
         except Exception as _ge:
             st.caption(f"Vorschau nicht verfügbar: {_ge}")
 
