@@ -1969,29 +1969,47 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
                      f"_(Zustände mit {ap} im Label)_")
         return r
 
+    def _why_in_EX(s, Z):
+        wit = sorted(succ[s] & Z)
+        return f"succ({s})∩Z = {{{', '.join(wit)}}}" if wit else ""
+
+    def _why_in_AX(s, Z):
+        return f"succ({s}) = {{{', '.join(sorted(succ[s]))}}} ⊆ Z"
+
+    def _why_out_AX(s, Z):
+        missing = sorted(succ[s] - Z)
+        return f"{', '.join(missing)} ∉ Z"
+
     def sat_EX(phi):
         r = {s for s in states if succ[s] & phi}
-        lines.append(f"- **EX** {fmt(phi)} = {fmt(r)}  "
-                     f"_(Zustände mit mind. 1 Nachfolger in φ)_")
+        reasons = [f"{s} (∃ Nachfolger {sorted(succ[s]&phi)[0]} ∈ φ)" for s in sorted(r)]
+        lines.append(f"- **EX** {fmt(phi)} = {fmt(r)}  _(∃ Nachfolger in φ)_")
+        if reasons: lines.append(f"  - Begründung: {', '.join(reasons)}")
         return r
 
     def sat_AX(phi):
         r = {s for s in states if succ[s] and succ[s] <= phi}
-        lines.append(f"- **AX** {fmt(phi)} = {fmt(r)}")
+        reasons = [f"{s} (alle succ∈φ: {{{', '.join(sorted(succ[s]))}}})" for s in sorted(r)]
+        lines.append(f"- **AX** {fmt(phi)} = {fmt(r)}  _(alle Nachfolger in φ)_")
+        if reasons: lines.append(f"  - Begründung: {', '.join(reasons)}")
         return r
 
     def sat_EF(phi):
-        # μZ. φ ∪ EX Z
         Z = set(phi)
         k = 0
-        lines.append(f"- **EF** {fmt(phi)} = μZ. φ ∪ EX Z:")
-        lines.append(f"  - Z₀ = {fmt(Z)}")
+        lines.append(f"- **EF** {fmt(phi)} = μZ. φ ∪ EX Z  _(kleinster Fixpunkt)_:")
+        lines.append(f"  - Z₀ = {fmt(Z)}  _(= φ, Basisfall)_")
         while True:
-            new = Z | {s for s in states if succ[s] & Z}
+            added = {s for s in states if succ[s] & Z} - Z
+            new = Z | added
             k += 1
-            lines.append(f"  - Z{k} = {fmt(new)}")
+            if added:
+                reasons = [f"{s} (Nachfolger {sorted(succ[s]&Z)[0]} ∈ Z{k-1})" for s in sorted(added)]
+                lines.append(f"  - Z{k} = {fmt(new)}  ← neu: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← keine neuen Zustände → **Fixpunkt** ✓")
             if new == Z:
-                lines.append(f"  - Fixpunkt ✓ → EF = {fmt(Z)}")
+                lines.append(f"  - **EF = {fmt(Z)}**")
                 break
             Z = new
         return Z
@@ -1999,20 +2017,24 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
     def sat_AF(phi):
         Z = set(phi)
         k = 0
-        lines.append(f"- **AF** {fmt(phi)} = μZ. φ ∪ AX Z:")
-        lines.append(f"  - Z₀ = {fmt(Z)}")
+        lines.append(f"- **AF** {fmt(phi)} = μZ. φ ∪ AX Z  _(kleinster Fixpunkt)_:")
+        lines.append(f"  - Z₀ = {fmt(Z)}  _(= φ, Basisfall)_")
         while True:
-            new = Z | {s for s in states if succ[s] and succ[s] <= Z}
+            added = {s for s in states if succ[s] and succ[s] <= Z} - Z
+            new = Z | added
             k += 1
-            lines.append(f"  - Z{k} = {fmt(new)}")
+            if added:
+                reasons = [f"{s} (succ = {{{', '.join(sorted(succ[s]))}}}, alle ∈ Z{k-1})" for s in sorted(added)]
+                lines.append(f"  - Z{k} = {fmt(new)}  ← neu: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← keine neuen Zustände → **Fixpunkt** ✓")
             if new == Z:
-                lines.append(f"  - Fixpunkt ✓ → AF = {fmt(Z)}")
+                lines.append(f"  - **AF = {fmt(Z)}**")
                 break
             Z = new
         return Z
 
     def sat_EG(phi):
-        # νZ. φ ∩ EX Z  (greatest fixpoint)
         Z = set(phi)
         k = 0
         lines.append(f"- **EG** {fmt(phi)} = νZ. φ ∩ EX Z  _(größter Fixpunkt)_:")
@@ -2020,11 +2042,15 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
         while True:
             ex_z = {s for s in states if succ[s] & Z}
             new = Z & ex_z
+            removed = Z - new
             k += 1
-            lines.append(f"  - EX(Z{k-1}) = {fmt(ex_z)}")
-            lines.append(f"  - Z{k} = φ ∩ EX(Z{k-1}) = {fmt(Z)} ∩ {fmt(ex_z)} = {fmt(new)}")
+            if removed:
+                reasons = [f"{s} (kein Nachfolger in Z{k-1})" for s in sorted(removed)]
+                lines.append(f"  - Z{k} = {fmt(new)}  ← entfernt: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← keine Änderung → **Fixpunkt** ✓")
             if new == Z:
-                lines.append(f"  - Z{k} = Z{k-1} → **Fixpunkt erreicht** → EG = {fmt(Z)}")
+                lines.append(f"  - **EG = {fmt(Z)}**")
                 break
             Z = new
         return Z
@@ -2033,14 +2059,23 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
         Z = set(phi)
         k = 0
         lines.append(f"- **AG** {fmt(phi)} = νZ. φ ∩ AX Z  _(größter Fixpunkt)_:")
-        lines.append(f"  - Z₀ = {fmt(Z)}")
+        lines.append(f"  - Z₀ = {fmt(Z)}  _(Start: alle φ-Zustände)_")
         while True:
             ax_z = {s for s in states if succ[s] and succ[s] <= Z}
             new = Z & ax_z
+            removed = Z - new
             k += 1
-            lines.append(f"  - Z{k} = φ ∩ AX(Z{k-1}) = {fmt(new)}")
+            if removed:
+                reasons = []
+                for s in sorted(removed):
+                    bad = sorted(succ[s] - Z)
+                    reasons.append(f"{s} (Nachfolger {', '.join(bad)} ∉ Z{k-1})" if bad
+                                   else f"{s} (keine Nachfolger)")
+                lines.append(f"  - Z{k} = {fmt(new)}  ← entfernt: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← keine Änderung → **Fixpunkt** ✓")
             if new == Z:
-                lines.append(f"  - Fixpunkt ✓ → AG = {fmt(Z)}")
+                lines.append(f"  - **AG = {fmt(Z)}**")
                 break
             Z = new
         return Z
@@ -2049,14 +2084,19 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
         Z = set(psi)
         k = 0
         lines.append(f"- **E[φ U ψ]** = μZ. ψ ∪ (φ ∩ EX Z)  _(kleinster Fixpunkt)_:")
-        lines.append(f"  - Z₀ = {fmt(Z)}")
+        lines.append(f"  - Z₀ = {fmt(Z)}  _(= ψ)_")
         while True:
             ex_z = {s for s in states if succ[s] & Z}
-            new = Z | (phi & ex_z)
+            added = (phi & ex_z) - Z
+            new = Z | added
             k += 1
-            lines.append(f"  - Z{k} = {fmt(new)}")
+            if added:
+                reasons = [f"{s} (∈φ, Nachfolger {sorted(succ[s]&Z)[0]}∈Z{k-1})" for s in sorted(added)]
+                lines.append(f"  - Z{k} = {fmt(new)}  ← neu: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← Fixpunkt ✓")
             if new == Z:
-                lines.append(f"  - Fixpunkt ✓ → EU = {fmt(Z)}")
+                lines.append(f"  - **EU = {fmt(Z)}**")
                 break
             Z = new
         return Z
@@ -2065,14 +2105,19 @@ def _ctl_tableaux_explain(states, transitions, labels, formula_str):
         Z = set(psi)
         k = 0
         lines.append(f"- **A[φ U ψ]** = μZ. ψ ∪ (φ ∩ AX Z)  _(kleinster Fixpunkt)_:")
-        lines.append(f"  - Z₀ = {fmt(Z)}")
+        lines.append(f"  - Z₀ = {fmt(Z)}  _(= ψ)_")
         while True:
             ax_z = {s for s in states if succ[s] and succ[s] <= Z}
-            new = Z | (phi & ax_z)
+            added = (phi & ax_z) - Z
+            new = Z | added
             k += 1
-            lines.append(f"  - Z{k} = {fmt(new)}")
+            if added:
+                reasons = [f"{s} (∈φ, succ⊆Z{k-1})" for s in sorted(added)]
+                lines.append(f"  - Z{k} = {fmt(new)}  ← neu: {', '.join(reasons)}")
+            else:
+                lines.append(f"  - Z{k} = {fmt(new)}  ← Fixpunkt ✓")
             if new == Z:
-                lines.append(f"  - Fixpunkt ✓ → AU = {fmt(Z)}")
+                lines.append(f"  - **AU = {fmt(Z)}**")
                 break
             Z = new
         return Z

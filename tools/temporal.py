@@ -21,36 +21,43 @@ from tools.shared import (
 def render():
     st.header("Temporal Logic (CTL / LTL)")
 
-    with st.expander("📋 Temporal Logic Cheatsheet", expanded=True):
+    with st.expander("📋 CTL Theorie & Cheatsheet", expanded=True):
         st.markdown(r"""
-**CTL-Operatoren:**
-| Op | Bedeutung |
-|---|---|
-| `EX φ` | Es gibt einen Nachfolger wo φ gilt |
-| `AX φ` | In allen Nachfolgern gilt φ |
-| `EF φ` | Es gibt einen Pfad wo φ irgendwann gilt |
-| `AF φ` | Auf allen Pfaden gilt φ irgendwann |
-| `EG φ` | Es gibt einen Pfad wo φ immer gilt |
-| `AG φ` | Auf allen Pfaden gilt φ immer |
-| `E[φ U ψ]` | Es gibt Pfad: φ gilt bis ψ |
-| `A[φ U ψ]` | Alle Pfade: φ gilt bis ψ |
+**Kripke-Struktur:** M = (S, S₀, R, L)
+S = Zustände, S₀ = Anfangszustände, R ⊆ S×S = Übergänge (total!), L: S → 2^AP = Labels
+
+---
+
+**CTL-Operatoren — Semantik & Fixpunkt-Algorithmus:**
+
+| Formel | Bedeutung | Algorithmus |
+|--------|-----------|-------------|
+| `EX φ` | ∃ Nachfolger mit φ | direkt: {s \| succ(s)∩⟦φ⟧ ≠ ∅} |
+| `AX φ` | ∀ Nachfolger mit φ | direkt: {s \| succ(s) ⊆ ⟦φ⟧} |
+| `EF φ` | ∃ Pfad, irgendwann φ | **μZ. φ ∪ EX(Z)** — kleinster Fixpunkt, Start Z₀=φ |
+| `AF φ` | ∀ Pfade, irgendwann φ | **μZ. φ ∪ AX(Z)** — kleinster Fixpunkt, Start Z₀=φ |
+| `EG φ` | ∃ Pfad, immer φ | **νZ. φ ∩ EX(Z)** — größter Fixpunkt, Start Z₀=φ |
+| `AG φ` | ∀ Pfade, immer φ | **νZ. φ ∩ AX(Z)** — größter Fixpunkt, Start Z₀=φ |
+| `E[φ U ψ]` | ∃ Pfad: φ bis ψ | **μZ. ψ ∪ (φ ∩ EX(Z))** |
+| `A[φ U ψ]` | ∀ Pfade: φ bis ψ | **μZ. ψ ∪ (φ ∩ AX(Z))** |
+
+**Fixpunkt-Intuition:**
+- **Kleinster Fixpunkt (μ)** = iteriere von ∅ aufwärts bis keine Änderung → für "eventually" (irgendwann)
+- **Größter Fixpunkt (ν)** = iteriere von S abwärts bis keine Änderung → für "always" (immer)
+
+**Prüfungs-Vorgehen:**
+1. Formel von innen nach außen auswerten (bottom-up)
+2. Für jeden Operator: Basisfall + Iteration aufschreiben
+3. Bei jedem Schritt begründen: welcher Zustand kommt neu dazu / fällt raus und warum
+
+---
 
 **Eingabe-Syntax für den Checker:**
-- Atome: kleingeschriebene Namen, z.B. `p`, `q`, `ready`
-- Operatoren: `!` (not), `&` (and), `|` (or), `->` (implies)
-- Modale Ops: `EX`, `AX`, `EF`, `AF`, `EG`, `AG`, `E[φ U ψ]`, `A[φ U ψ]`
-- Beispiele: `AG(p -> EF q)`, `EG !p`, `A[p U q]`, `AX(EF p)`
-
-**Deterministischer LTL-Trace-Checker (Lasso-Pfad):**
-- Operatoren: `X` (next), `F` (eventually), `G` (globally), `U` (until), plus `!`, `&`, `|`, `->`
-- Semantik auf einem letztlich periodischen Pfad (Loop-Start einstellbar)
-- Beispiele: `G(p -> F q)`, `X p`, `(p U q)`
-
-**Kripke-Struktur:** M = (S, S₀, R, L)
-- S: Zustandsmenge
-- S₀: Anfangszustände
-- R: Übergangsrelation (total: jeder Zustand braucht mind. einen Nachfolger)
-- L: Labeling-Funktion
+- Atome: Kleinbuchstaben `a`, `b`, `p`, `q`
+- Logik: `!` (¬), `&` (∧), `|` (∨), `->` oder `⇒` (→)
+- CTL: `EX`, `AX`, `EF`, `AF`, `EG`, `AG`, `E[φ U ψ]`, `A[φ U ψ]`
+- Kurzform: `AGFa` = `AG(F(a))` wird automatisch geparst
+- Path-Formel: `E(a&Xb)` = a ∧ EX(b)
 """)
 
     # ── Deterministic CTL Model Checker ──────────────────────────────────
