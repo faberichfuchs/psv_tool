@@ -368,6 +368,51 @@ def render():
     elif wp_mode == "Loop-Invariante prüfen":
         st.markdown("""**Syntax:** Python-Ausdrücke mit Z3. Beispiel: `And(y == i, i >= 0, i <= n)`, `i < n`, `y == n`""")
 
+        # ── Code direkt einfügen (optional) ─────────────────────────────────
+        with st.expander("📋 Code direkt einfügen (auto-parsen)", expanded=False):
+            st.caption("Füge den Programm-Code (C- oder Python-Syntax, ohne {Pre}/{Post}) ein — die App extrahiert Init, B und Body automatisch.")
+            raw_code_inv = st.text_area(
+                "Programm-Code",
+                height=160,
+                key="inv_raw_code",
+                placeholder="if (b >= a) { tmp = a; a = b + 1; b = tmp; }\nwhile (a != b && x != y) { a = a - 1; y = y + 1; }",
+            )
+            if st.button("Code analysieren →", key="inv_parse_btn") and raw_code_inv.strip():
+                try:
+                    py_code = _c_to_py_inline(raw_code_inv)
+                    import ast as _ast_inv
+                    _tree_inv = _ast_inv.parse(py_code)
+                    _loop_inv = next((s for s in _ast_inv.walk(_tree_inv) if isinstance(s, _ast_inv.While)), None)
+                    if _loop_inv:
+                        _prefix_inv = []
+                        _in_while = False
+                        for _line in py_code.splitlines():
+                            _s = _line.strip()
+                            if not _in_while and _s.startswith("while ") and _s.endswith(":"):
+                                _in_while = True
+                            elif not _in_while and _s:
+                                _prefix_inv.append(_line)
+                        import textwrap as _tw_inv
+                        _init_default = _tw_inv.dedent("\n".join(_prefix_inv)).strip()
+                        _cond_default = _ast_inv.unparse(_loop_inv.test)
+                        _body_lines = []
+                        for _bs in _loop_inv.body:
+                            _body_lines.append(_ast_inv.unparse(_bs))
+                        _body_default = "\n".join(_body_lines)
+                        _vars_found = sorted({n.id for n in _ast_inv.walk(_tree_inv)
+                                              if isinstance(n, _ast_inv.Name)
+                                              and n.id not in ("True","False","And","Or","Not","Implies","tmp")})
+                        st.session_state["inv_vars"]  = ", ".join(_vars_found)
+                        st.session_state["inv_init"]  = _init_default
+                        st.session_state["inv_B"]     = _cond_default
+                        st.session_state["inv_body"]  = _body_default
+                        st.success(f"Erkannt: Variablen `{', '.join(_vars_found)}` · B: `{_cond_default}`")
+                        st.rerun()
+                    else:
+                        st.error("Keine while-Schleife gefunden.")
+                except Exception as _e:
+                    st.error(f"Parse-Fehler: {_e}")
+
         col1, col2 = st.columns(2)
         with col1:
             inv_vars   = st.text_input("Integer-Variablen (kommagetrennt)", value="n, y, i", key="inv_vars")
@@ -376,7 +421,7 @@ def render():
             inv_B      = st.text_input("Schleifenbedingung B", value="i < n", key="inv_B")
         with col2:
             inv_Q      = st.text_input("Nachbedingung Q", value="y == n", key="inv_Q")
-            inv_init   = st.text_area("Init-Code (vor Schleife: Zuweisungen + if/else, Python-Syntax)",
+            inv_init   = st.text_area("Init-Code (vor Schleife, Python-Syntax)",
                                       value="y = 0\ni = 0", height=80, key="inv_init")
             inv_body   = st.text_area("Schleifenkörper (eine Zuweisung pro Zeile: var = expr)",
                                       value="y = y + 1\ni = i + 1", height=80, key="inv_body")
