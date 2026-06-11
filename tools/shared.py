@@ -1289,7 +1289,8 @@ def z3_parse_expr(s: str, z3ns: dict):
     Accepts:
       - C-syntax:      i > 1 && i < 10,  l*l <= n,  !(i == 0)
       - Python-syntax: i > 1 and i < 10, not i == 0
-      - Z3-syntax:     And(i >= 2, i <= 10)
+      - Z3-syntax:     And(i >= 2, i <= 10), Implies(b > x, a > y)
+      - Implication:   (b > x) => (a > y)  or  (b > x) ⇒ (a > y)  or  ->
       - Chained:       l*l <= n < r*r   (rewritten to And(l*l<=n, n<r*r))
     """
     import re as _re
@@ -1307,6 +1308,15 @@ def z3_parse_expr(s: str, z3ns: dict):
     s = _re.sub(r'\|\|', ' or ', s)
     # ! not followed by = → not
     s = _re.sub(r'!(?!=)', 'not ', s)
+    # => / ⇒ → Implies( , )
+    # rewrite "A => B" to "Implies(A, B)" via regex (handles one implication per expr)
+    def _rewrite_implies(expr):
+        for arrow in ('=>', '⇒', '->'):
+            if arrow in expr:
+                lhs, rhs = expr.split(arrow, 1)
+                return f'Implies({lhs.strip()}, {rhs.strip()})'
+        return expr
+    s = _rewrite_implies(s)
 
     import ast as _ast
     from z3 import And, Or, Not
@@ -1664,7 +1674,7 @@ def _generate_hoare_proof(
         wp_body = _wp_stmts(body_stmts, I)
 
         pres_ok = _check(lambda s: (
-            s.add(_safe_eval(invariant_str), _eval_z3(cond_str),
+            s.add(_eval_z3(invariant_str), _eval_z3(cond_str),
                   *[v >= 0 for v in vars_dict.values()],
                   Not(wp_body))
         ))
@@ -1688,7 +1698,7 @@ def _generate_hoare_proof(
         out.append(f"    ← While-Regel: I bleibt, B ist falsch")
 
         conseq_ok = _check(lambda s: (
-            s.add(_safe_eval(invariant_str), Not(_eval_z3(cond_str)),
+            s.add(_eval_z3(invariant_str), Not(_eval_z3(cond_str)),
                   *[v >= 0 for v in vars_dict.values()],
                   Not(Post))
         ))

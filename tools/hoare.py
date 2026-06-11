@@ -190,7 +190,7 @@ extrahiert die Variablen und füllt die Felder für die Invariantenprüfung aus.
         if has_while:
             inv_default = st.session_state.get("triple_inv_prefill", "")
             inv_I = st.text_input(
-                "Loop-Invariante I (C: `i>=2 && i<10`, Python: `i>=2 and i<10`, Z3: `And(i>=2,i<=10)`, Chained: `l*l<=n<r*r`)",
+                "Loop-Invariante I (C: `i>=2 && i<10`, Implies: `(b>x) => (a>y)`, Z3: `And(...)`, Chained: `l*l<=n<r*r`)",
                 value=inv_default,
                 key="triple_inv",
                 help="Tippe deine Vermutung ein — Z3 prüft Init, Erhaltung, Konsequenz."
