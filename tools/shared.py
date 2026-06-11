@@ -2190,6 +2190,36 @@ def _parse_ctl(tokens):
             inner = parse_primary()
             return (tok_up, inner)
 
+        # Single-letter temporal: F a → AF a (path-level, default all-paths)
+        if tok_up == 'F':
+            consume(tok)
+            inner = parse_primary()
+            return ('AF', inner)
+
+        if tok_up == 'G':
+            consume(tok)
+            inner = parse_primary()
+            return ('AG', inner)
+
+        # X a → AX a (default all-paths)
+        if tok_up == 'X':
+            consume(tok)
+            inner = parse_primary()
+            return ('AX', inner)
+
+        # E(...) with path formula — rewrite path-level X to EX inside
+        if tok_up == 'E' and pos[0] + 1 < len(tokens) and tokens[pos[0]+1] == '(':
+            consume(tok)
+            consume('(')
+            inner = parse_formula()
+            consume(')')
+            # Rewrite AX nodes (from bare X) to EX inside E(...)
+            def _to_ex(node):
+                if not isinstance(node, tuple): return node
+                if node[0] == 'AX': return ('EX', _to_ex(node[1]))
+                return tuple(_to_ex(c) for c in node)
+            return _to_ex(inner)
+
         if tok_up == 'E' and pos[0] + 1 < len(tokens) and tokens[pos[0]+1] == '[':
             consume(tok)
             consume('[')
@@ -2224,9 +2254,24 @@ def _parse_ctl(tokens):
 
 
 def _tokenize_ctl(formula_str):
-    """Split a CTL formula string into tokens."""
+    """Split a CTL formula string into tokens.
+    CTL operators (AG, AF, ...) are matched before identifiers so that
+    'AGFa' tokenizes as ['AG', 'F', 'a'], not as a single atom.
+    Also handles Unicode symbols: ∧ & → ⇒ ∨ ¬ ≠ ≤ ≥
+    """
     import re
-    token_re = re.compile(r'->|\[|\]|[()!&|]|[A-Za-z][A-Za-z0-9_]*')
+    # Normalize unicode operators to ASCII equivalents
+    formula_str = formula_str.replace('∧', '&').replace('∨', '|')
+    formula_str = formula_str.replace('¬', '!').replace('→', '->')
+    formula_str = formula_str.replace('⇒', '->').replace('≠', '!=')
+    formula_str = formula_str.replace('≤', '<=').replace('≥', '>=')
+    token_re = re.compile(
+        r'->|!=|<=|>=|\[|\]|[()!&|]'          # punctuation / operators
+        r'|AG|AF|AX|AU|EG|EF|EX|EU'           # two-letter CTL operators (before single-letter!)
+        r'|[AGEFXU]'                           # single-letter CTL operators
+        r'|[a-z][a-zA-Z0-9_]*'                # atomic propositions (lowercase start)
+        r'|[0-9]+'                             # numbers
+    )
     return token_re.findall(formula_str)
 
 
