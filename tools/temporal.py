@@ -130,6 +130,66 @@ S = Zustände, S₀ = Anfangszustände, R ⊆ S×S = Übergänge (total!), L: S 
         except Exception as _ge:
             st.caption(f"Vorschau nicht verfügbar: {_ge}")
 
+    with st.expander("📖 Syntax-Legende: alle erlaubten Operatoren", expanded=False):
+        st.markdown("""
+**Atomare Propositionen** — Kleinbuchstaben, z.B. `a`, `b`, `p`, `q`, `idle`
+
+---
+
+**Boolesche Operatoren**
+
+| Operator | Eingabe | Beispiel |
+|----------|---------|---------|
+| Nicht | `!` | `!a` |
+| Und | `&` oder `∧` | `a & b` |
+| Oder | `\|` oder `∨` | `a \| b` |
+| Implikation | `->` oder `=>` oder `⇒` oder `→` | `a -> b` |
+
+---
+
+**CTL-Pfadquantoren + Modaloperatoren**
+
+| Operator | Bedeutung | Eingabe | Beispiel |
+|----------|-----------|---------|---------|
+| AX φ | in allen nächsten Zuständen gilt φ | `AX φ` oder `Xφ` | `AX a` |
+| EX φ | in einem nächsten Zustand gilt φ | `EX φ` | `EX b` |
+| AF φ | auf allen Pfaden irgendwann φ | `AF φ` oder `Fφ` | `AF a` |
+| EF φ | auf einem Pfad irgendwann φ | `EF φ` | `EF b` |
+| AG φ | auf allen Pfaden immer φ | `AG φ` oder `Gφ` | `AG a` |
+| EG φ | auf einem Pfad immer φ | `EG φ` | `EG a` |
+| A[φ U ψ] | auf allen Pfaden φ bis ψ | `A[φ U ψ]` | `A[a U b]` |
+| E[φ U ψ] | auf einem Pfad φ bis ψ | `E[φ U ψ]` | `E[a U b]` |
+
+---
+
+**Pfadformeln innerhalb E(...)**
+
+Innerhalb von `E(...)` wird `X` automatisch zu `EX` umgeschrieben:
+
+| Eingabe | Interpretation |
+|---------|---------------|
+| `E(a & Xb)` | a gilt jetzt **und** EX(b) gilt |
+| `E(a & Fb)` | a gilt jetzt **und** EF(b) gilt |
+
+---
+
+**Konkrete Beispiele**
+
+| Formel | Bedeutung |
+|--------|-----------|
+| `AG a` | In jedem Zustand jedes Pfads gilt a |
+| `EF b` | Es gibt einen Pfad, auf dem irgendwann b gilt |
+| `AG(a -> EF b)` | Überall wo a gilt, gibt es danach einen Pfad zu b |
+| `AG(b -> Fa)` | Überall wo b gilt, folgt irgendwann a (auf allen Pfaden) |
+| `AGF a` | Auf allen Pfaden gilt a unendlich oft |
+| `AFG a` | Auf allen Pfaden gilt a ab einem Punkt dauerhaft |
+| `AGF(a & Xb)` | Unendlich oft: a gilt und im nächsten Schritt b |
+| `E(a & Xb)` | Es gibt einen Zustand mit a, der einen b-Nachfolger hat |
+| `A[a U b]` | Auf allen Pfaden gilt a bis b eintritt |
+| `E[a U b]` | Auf einem Pfad gilt a bis b eintritt |
+| `AG(p \| !q)` | Niemals gilt p falsch und q wahr gleichzeitig |
+""")
+
     if st.button("Formel prüfen ✓", type="primary", key="ctl_check_btn"):
         try:
             states_list = [s.strip() for s in ctl_states_in.split(",") if s.strip()]
